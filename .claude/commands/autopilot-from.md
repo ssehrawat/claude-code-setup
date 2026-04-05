@@ -71,14 +71,9 @@ Delegate to the **doc-maintainer** subagent:
   - **Update if changed:** any existing doc affected by the code changes
 - Do NOT skip doc creation for "first-time" projects — this is exactly when those essential docs should be written
 
-## Step 5: Cleanup & Summary
+## Step 5: Summary & Cleanup
 
-Remove the sentinel file:
-```bash
-rm -f .claude/.autopilot-active
-```
-
-Then provide a summary of what was done (only for stages that actually ran):
+Provide a summary first, THEN remove the sentinel:
 
 ```
 ## Autopilot Summary (from {starting_stage})
@@ -102,4 +97,9 @@ Then provide a summary of what was done (only for stages that actually ran):
 
 ### Issues / Warnings
 - {anything that needs human attention}
+```
+
+Now remove the sentinel file (must be the very last action):
+```bash
+rm -f .claude/.autopilot-active
 ```

@@ -32,6 +32,23 @@ fi
 
 TURN_LOCK="$TURN_LOCK_DIR/$SESSION_ID.lock"
 
+# ── Autopilot guard ──────────────────────────────────────────
+# During autopilot, UserPromptSubmit fires for internal subagent
+# invocations, not real user messages. Clearing the lock here would
+# break the Stop hook's turn-scoped dedup.
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-}"
+if [ -z "$PROJECT_DIR" ]; then
+  PROJECT_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+fi
+if [ -z "$PROJECT_DIR" ]; then
+  PROJECT_DIR="$(pwd)"
+fi
+
+if [ -f "$PROJECT_DIR/.claude/.autopilot-active" ]; then
+  log "Autopilot active — skipping lock clear (session=$SESSION_ID)"
+  exit 0
+fi
+
 if [ -f "$TURN_LOCK" ]; then
   rm -f "$TURN_LOCK" 2>/dev/null
   log "Cleared turn lock: $TURN_LOCK (session=$SESSION_ID)"

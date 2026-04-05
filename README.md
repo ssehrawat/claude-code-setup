@@ -168,7 +168,7 @@ Fires after every task. Detects source file changes via git and triggers `qa-exp
 ### Two hooks working together
 
 1. **Stop hook** (`update-docs.sh`): Runs when Claude finishes responding. Checks for source file changes and triggers the maintenance agents.
-2. **UserPromptSubmit hook** (`clear-turn-lock.sh`): Runs when you send a new message. Clears the turn lock so the next Stop fire starts fresh.
+2. **UserPromptSubmit hook** (`clear-turn-lock.sh`): Runs when you send a new message. Clears the turn lock so the next Stop fire starts fresh. Skips clearing during autopilot (since Claude Code fires this event for internal subagent invocations too).
 
 ### The turn lock
 
@@ -183,7 +183,11 @@ Locks are keyed by Claude Code's `session_id` so different terminals don't inter
 ```
 You send a message
   ↓
-UserPromptSubmit fires → deletes turn lock (fresh turn)
+UserPromptSubmit fires → clear-turn-lock.sh runs
+  ↓
+Autopilot sentinel (.claude/.autopilot-active) present?
+  YES → skip lock clear, exit 0 (not a real user message)
+  NO  → delete turn lock (fresh turn)
   ↓
 Claude processes, makes changes, finishes
   ↓
