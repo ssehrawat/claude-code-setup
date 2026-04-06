@@ -6,10 +6,14 @@
 #   settings.json                     — Stop hook wiring
 #   commands/plan.md                  — /plan slash command
 #   commands/review-plan.md           — /review-plan slash command
+#   commands/implement.md             — /implement slash command
+#   commands/autopilot.md             — /autopilot slash command
+#   commands/autopilot-from.md        — /autopilot-from slash command
 #   agents/planner.md                 — Implementation planning expert
+#   agents/engineer.md                — Implementation coding expert
 #   agents/qa-expert.md               — QA & testing expert
 #   agents/doc-maintainer.md          — Technical documentation expert
-#   hooks/update-docs.sh              — Change detection hook
+#   hooks/update-docs.sh              — Change detection hook (fingerprint-based dedup)
 #
 # Usage:
 #   chmod +x install.sh && ./install.sh
@@ -116,14 +120,22 @@ cp "$SOURCE_DIR/hooks/update-docs.sh"       "$CLAUDE_DIR/hooks/update-docs.sh"
 chmod +x "$CLAUDE_DIR/hooks/update-docs.sh"
 echo "  ✅ ~/.claude/hooks/update-docs.sh"
 
-cp "$SOURCE_DIR/hooks/clear-turn-lock.sh"   "$CLAUDE_DIR/hooks/clear-turn-lock.sh"
-chmod +x "$CLAUDE_DIR/hooks/clear-turn-lock.sh"
-echo "  ✅ ~/.claude/hooks/clear-turn-lock.sh"
+# Clean up clear-turn-lock.sh from previous versions (replaced by fingerprint dedup)
+if [ -f "$CLAUDE_DIR/hooks/clear-turn-lock.sh" ]; then
+  rm "$CLAUDE_DIR/hooks/clear-turn-lock.sh"
+  echo "  🧹 Removed old ~/.claude/hooks/clear-turn-lock.sh (turn-lock dedup replaced by fingerprint)"
+fi
+
+# Clean up stale turn locks from previous versions
+if [ -d "$CLAUDE_DIR/hooks/.turn-locks" ]; then
+  rm -rf "$CLAUDE_DIR/hooks/.turn-locks"
+  echo "  🧹 Removed old ~/.claude/hooks/.turn-locks/ (turn-lock dedup replaced by fingerprint)"
+fi
 
 # Clean up stale state from previous timer-based versions
 if [ -d "$CLAUDE_DIR/hooks/.session-state" ]; then
   rm -rf "$CLAUDE_DIR/hooks/.session-state"
-  echo "  🧹 Removed old ~/.claude/hooks/.session-state/ (timer-based dedup replaced by turn lock)"
+  echo "  🧹 Removed old ~/.claude/hooks/.session-state/ (timer-based dedup replaced by fingerprint)"
 fi
 
 # ── Done ──────────────────────────────────────────────────────

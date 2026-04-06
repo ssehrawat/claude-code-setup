@@ -16,7 +16,7 @@ Parse the FIRST word of $ARGUMENTS (after "AUTOMODE") to determine the starting 
 
 ---
 
-**IMPORTANT — Sentinel file:** Before starting, create `.claude/.autopilot-active` to prevent the Stop hook from double-triggering. Delete it at the end.
+**IMPORTANT — Sentinel file:** Before starting, create `.claude/.autopilot-active` to prevent the Stop hook from double-triggering. Delete it at the end. Note: stale sentinels older than 2 hours are auto-cleaned by the Stop hook, so a crash won't permanently block agent triggers.
 
 ```bash
 mkdir -p .claude && touch .claude/.autopilot-active

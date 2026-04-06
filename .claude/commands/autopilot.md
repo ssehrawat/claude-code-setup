@@ -2,7 +2,7 @@ AUTOMODE — Run the full development pipeline automatically for: $ARGUMENTS
 
 Execute ALL steps below in order. Do NOT stop between steps. Do NOT ask for confirmation. Complete the entire chain autonomously.
 
-**IMPORTANT — Sentinel file:** Before starting, create `.claude/.autopilot-active` to prevent the Stop hook from double-triggering the test/doc agents. Delete it after the final step.
+**IMPORTANT — Sentinel file:** Before starting, create `.claude/.autopilot-active` to prevent the Stop hook from double-triggering the test/doc agents. Delete it after the final step. Note: stale sentinels older than 2 hours are auto-cleaned by the Stop hook, so a crash won't permanently block agent triggers.
 
 ```bash
 mkdir -p .claude && touch .claude/.autopilot-active

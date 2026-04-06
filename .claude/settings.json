@@ -10,17 +10,6 @@
           }
         ]
       }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/.claude/hooks/clear-turn-lock.sh",
-            "timeout": 5
-          }
-        ]
-      }
     ]
   }
 }

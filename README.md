@@ -163,75 +163,60 @@ Contains: task summary, approach, affected components. Quick paper trail without
 
 ## How the Stop Hook Works
 
-Fires after every task. Detects source file changes via git and triggers `qa-expert` + `doc-maintainer` automatically — at most **once per user turn**.
+A single Stop hook (`update-docs.sh`) fires after every task. It detects source file changes via git and triggers `qa-expert` + `doc-maintainer` automatically — using **fingerprint-based dedup** to avoid redundant runs.
 
-### Two hooks working together
+### Fingerprint dedup
 
-1. **Stop hook** (`update-docs.sh`): Runs when Claude finishes responding. Checks for source file changes and triggers the maintenance agents.
-2. **UserPromptSubmit hook** (`clear-turn-lock.sh`): Runs when you send a new message. Clears the turn lock so the next Stop fire starts fresh. Skips clearing during autopilot (since Claude Code fires this event for internal subagent invocations too).
+Claude Code can fire the Stop event multiple times within a single turn (once per subagent return, once per follow-up reply, etc.). To prevent redundant agent runs, the hook computes a **fingerprint** — a hash of the sorted list of uncommitted + untracked source files. If the fingerprint matches the last-processed one, the hook skips.
 
-### The turn lock
+No companion hook needed. No timers. No turn locks. The fingerprint is purely state-based: same files = same hash = skip.
 
-Claude Code can fire the Stop event multiple times within a single user turn (once per subagent return, once per follow-up reply, etc.). To prevent the maintenance agents from running repeatedly, the Stop hook creates a **turn lock** file after triggering them. Any subsequent Stop fires within the same turn see the lock and skip.
-
-The lock is cleared when you send your next message — UserPromptSubmit deletes it, and the next Stop fire is free to trigger agents again if new changes exist.
-
-Locks are keyed by Claude Code's `session_id` so different terminals don't interfere.
+Fingerprints are keyed by Claude Code's `session_id` so different terminals don't interfere.
 
 ### The flow
 
 ```
-You send a message
-  ↓
-UserPromptSubmit fires → clear-turn-lock.sh runs
-  ↓
-Autopilot sentinel (.claude/.autopilot-active) present?
-  YES → skip lock clear, exit 0 (not a real user message)
-  NO  → delete turn lock (fresh turn)
-  ↓
-Claude processes, makes changes, finishes
+Claude processes your request, makes changes, finishes
   ↓
 Stop hook fires → update-docs.sh runs
   ↓
 stop_hook_active flag set? (Claude Code's own loop guard)
   YES → exit 0
   ↓
-Turn lock exists?
-  YES → exit 0 (agents already ran this turn)
-  ↓
 Autopilot sentinel (.claude/.autopilot-active) present?
-  YES → set turn lock + exit 0 (autopilot handles agents itself)
+  Stale (>2h)? → delete sentinel + warn, continue
+  Fresh?       → save fingerprint + exit 0 (autopilot handles agents itself)
   ↓
-Source files changed? (git diff + untracked + last commit)
+Source files changed? (git diff HEAD + untracked)
   NO  → exit 0
-  YES → set turn lock + return decision:block with agent instructions
+  ↓
+Compute fingerprint (hash of sorted source file list)
+  ↓
+Fingerprint matches last-processed?
+  YES → exit 0 (already handled)
+  ↓
+Save fingerprint → return decision:block with agent instructions
   ↓
 Claude reads the block reason and spawns in parallel:
   ├── qa-expert       → writes/updates tests, runs suite
   └── doc-maintainer  → updates all documentation
   ↓
-Agents return → Stop fires again → turn lock set → skip
+Agents return → Stop fires → same fingerprint → skip ✓
   ↓
-Claude finishes summary → Stop fires → turn lock set → skip
+User commits → Stop fires → no uncommitted files → skip ✓
   ↓
-Turn ends. Lock persists until your next message.
+User writes more code → Stop fires → new fingerprint → trigger ✓
 ```
 
 ### Three safety nets prevent loops
 
 1. **Claude Code's built-in `stop_hook_active` flag** — if the hook already caused Claude to continue once, this flag is true on the next fire and the hook exits immediately
-2. **Turn lock file** — persists across all Stop fires within a turn until UserPromptSubmit clears it
-3. **Autopilot sentinel** (`.claude/.autopilot-active`) — short-circuits the hook entirely during `/autopilot` runs, since autopilot handles the maintenance agents itself
-
-### Known edge case (rare)
-
-If the main agent produces source changes in **two separate batches within one turn**, the second batch will be skipped because the lock is already set from the first. This is rare in practice — Claude typically completes all code changes before returning control.
-
-**Escape hatch:** If you ever hit this, just send any follow-up message (`"continue"`, `"also update tests"`, `"done?"`). The UserPromptSubmit hook clears the lock and the next Stop fire will process the new changes. The debug log will tell you exactly when this happens.
+2. **Fingerprint file** — hash of the processed file list, keyed by session; same files = same hash = skip
+3. **Autopilot sentinel** (`.claude/.autopilot-active`) — short-circuits the hook during `/autopilot` runs (saves the fingerprint so post-autopilot fires also skip). Stale sentinels older than 2 hours are auto-cleaned.
 
 ### Debug log
 
-Every hook invocation is logged to `~/.claude/hooks/update-docs.log` with `[stop]` and `[prompt]` tags. If agents aren't running when you expect them to, check this file first — it shows every decision the hook made and why.
+Every hook invocation is logged to `~/.claude/hooks/update-docs.log` with `[stop]` tags. If agents aren't running when you expect them to, check this file first — it shows every decision the hook made and why.
 
 ### "Stop hook error" messages
 
@@ -249,7 +234,7 @@ Add to your project's `.gitignore`:
 ```
 ~/.claude/
 ├── CLAUDE.md                      ← code quality + doc standard rules
-├── settings.json                  ← Stop + UserPromptSubmit hook registration
+├── settings.json                  ← Stop hook registration
 ├── commands/
 │   ├── plan.md                    ← /plan (interactive Q&A)
 │   ├── review-plan.md             ← /review-plan (review only, never implements)
@@ -262,13 +247,12 @@ Add to your project's `.gitignore`:
 │   ├── qa-expert.md               ← testing expert
 │   └── doc-maintainer.md          ← documentation expert
 └── hooks/
-    ├── update-docs.sh             ← Stop hook: detect changes + trigger agents
-    └── clear-turn-lock.sh         ← UserPromptSubmit hook: clear turn lock
+    └── update-docs.sh             ← Stop hook: detect changes + trigger agents
 ```
 
 ## Merging With Existing Settings
 
-The installer backs up your existing `settings.json`. If you have existing hooks, merge both the `Stop` and `UserPromptSubmit` entries manually:
+The installer backs up your existing `settings.json`. If you have existing hooks, merge the `Stop` entry manually:
 
 ```json
 {
@@ -284,23 +268,12 @@ The installer backs up your existing `settings.json`. If you have existing hooks
           }
         ]
       }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/.claude/hooks/clear-turn-lock.sh",
-            "timeout": 5
-          }
-        ]
-      }
     ]
   }
 }
 ```
 
-Both hooks are required — the Stop hook triggers agents and sets the turn lock, the UserPromptSubmit hook clears the lock for fresh turns.
+Only one hook is needed — the Stop hook handles everything with fingerprint-based dedup.
 
 ## Per-Project Overrides
 
