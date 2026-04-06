@@ -92,9 +92,32 @@ FINGERPRINT_FILE="$FINGERPRINT_DIR/$SESSION_ID.fingerprint"
 log "session_id=$SESSION_ID"
 
 # ── Claude Code's built-in loop guard ────────────────────────
+# WHY: We still update the fingerprint here even though we're skipping.
+# The agents that just ran may have created new source files (test files,
+# docs). Without updating, the next non-guarded Stop fire would see a
+# fingerprint mismatch and re-trigger agents unnecessarily.
 STOP_ACTIVE=$(printf '%s' "$INPUT" | grep -o '"stop_hook_active"[[:space:]]*:[[:space:]]*true' 2>/dev/null)
 if [ -n "$STOP_ACTIVE" ]; then
-  log "stop_hook_active=true — exiting 0"
+  log "stop_hook_active=true — updating fingerprint and exiting 0"
+  PROJECT_DIR="${CLAUDE_PROJECT_DIR:-}"
+  if [ -z "$PROJECT_DIR" ]; then
+    PROJECT_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+  fi
+  if [ -z "$PROJECT_DIR" ]; then
+    PROJECT_DIR="$(pwd)"
+  fi
+  cd "$PROJECT_DIR" 2>/dev/null
+  SA_DIFF=$(git diff --name-only HEAD 2>/dev/null)
+  SA_UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null)
+  SA_ALL=$( { printf '%s\n' "$SA_DIFF"; printf '%s\n' "$SA_UNTRACKED"; } | sort -u | grep -v '^[[:space:]]*$' 2>/dev/null )
+  if [ -n "$SA_ALL" ]; then
+    SA_SOURCE=$(printf '%s\n' "$SA_ALL" | grep -E "$SOURCE_EXT_PATTERN" 2>/dev/null)
+    if [ -n "$SA_SOURCE" ]; then
+      SA_FP=$(printf '%s\n' "$SA_SOURCE" | sort | compute_hash)
+      printf '%s' "$SA_FP" > "$FINGERPRINT_FILE" 2>/dev/null
+      log "Updated fingerprint after agent run: $SA_FP"
+    fi
+  fi
   exit 0
 fi
 
