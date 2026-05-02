@@ -52,8 +52,9 @@ STALE_SENTINEL_MINUTES=120
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
 mkdir -p "$FINGERPRINT_DIR" 2>/dev/null
 
-# Housekeeping: clean stale fingerprints from ended sessions (>7 days old)
+# Housekeeping: clean stale fingerprints + baselines from ended sessions (>7 days old)
 find "$FINGERPRINT_DIR" -name "*.fingerprint" -mtime +7 -delete 2>/dev/null
+find "$FINGERPRINT_DIR" -name "*.baseline" -mtime +7 -delete 2>/dev/null
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [stop] $*" >> "$LOG_FILE" 2>/dev/null
@@ -183,14 +184,39 @@ fi
 SOURCE_COUNT=$(count_lines "$SOURCE_FILES")
 log "Source files matched: $SOURCE_COUNT"
 
+# ── Compute current fingerprint (defined even with 0 source files) ──
+if [ -n "$SOURCE_FILES" ]; then
+  CURRENT_FINGERPRINT=$(printf '%s\n' "$SOURCE_FILES" | sort | compute_hash)
+else
+  CURRENT_FINGERPRINT="empty"
+fi
+
+# ── Baseline: snapshot of dirty source files at session start ────────
+# WHY: Without a baseline, the hook fires on any pre-existing dirty
+# tree the moment a session starts, regardless of whether Claude
+# touched anything. The baseline is captured on the first Stop fire
+# of a session; subsequent Stops compare against it, so agents only
+# fire when source files actually changed during this session.
+BASELINE_FILE="$FINGERPRINT_DIR/$SESSION_ID.baseline"
+if [ ! -f "$BASELINE_FILE" ]; then
+  printf '%s' "$CURRENT_FINGERPRINT" > "$BASELINE_FILE" 2>/dev/null
+  log "First Stop in session — saved baseline: $CURRENT_FINGERPRINT, exiting 0"
+  exit 0
+fi
+
+BASELINE_FP=$(cat "$BASELINE_FILE" 2>/dev/null)
+if [ "$BASELINE_FP" = "$CURRENT_FINGERPRINT" ]; then
+  log "Source file set unchanged from session baseline ($BASELINE_FP) — exiting 0"
+  exit 0
+fi
+
+# ── Skip if no source files remain (e.g. user reverted changes) ──────
 if [ "$SOURCE_COUNT" -eq 0 ] || [ -z "$SOURCE_FILES" ]; then
   log "No source files changed — exiting 0"
   exit 0
 fi
 
-# ── Fingerprint dedup ────────────────────────────────────────
-CURRENT_FINGERPRINT=$(printf '%s\n' "$SOURCE_FILES" | sort | compute_hash)
-
+# ── Fingerprint dedup against last processed set ─────────────
 if [ -f "$FINGERPRINT_FILE" ] && [ "$(cat "$FINGERPRINT_FILE" 2>/dev/null)" = "$CURRENT_FINGERPRINT" ]; then
   log "Fingerprint unchanged ($CURRENT_FINGERPRINT) — already processed, exiting 0"
   exit 0
