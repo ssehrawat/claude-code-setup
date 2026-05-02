@@ -4,7 +4,7 @@
 # What this installs to ~/.claude/:
 #   CLAUDE.md                         — Global conventions & code quality rules
 #   settings.json                     — Stop hook wiring
-#   commands/plan.md                  — /plan slash command
+#   commands/build-plan.md            — /build-plan slash command
 #   commands/review-plan.md           — /review-plan slash command
 #   commands/implement.md             — /implement slash command
 #   commands/autopilot.md             — /autopilot slash command
@@ -83,8 +83,14 @@ echo "  ✅ ~/.claude/CLAUDE.md"
 cp "$SOURCE_DIR/settings.json"              "$CLAUDE_DIR/settings.json"
 echo "  ✅ ~/.claude/settings.json"
 
-cp "$SOURCE_DIR/commands/plan.md"           "$CLAUDE_DIR/commands/plan.md"
-echo "  ✅ ~/.claude/commands/plan.md"
+cp "$SOURCE_DIR/commands/build-plan.md"     "$CLAUDE_DIR/commands/build-plan.md"
+echo "  ✅ ~/.claude/commands/build-plan.md"
+
+# Clean up old plan.md if it exists (renamed to build-plan.md to avoid conflict with Claude's built-in /plan)
+if [ -f "$CLAUDE_DIR/commands/plan.md" ]; then
+  rm "$CLAUDE_DIR/commands/plan.md"
+  echo "  🧹 Removed old ~/.claude/commands/plan.md (renamed to build-plan.md)"
+fi
 
 cp "$SOURCE_DIR/commands/review-plan.md"    "$CLAUDE_DIR/commands/review-plan.md"
 echo "  ✅ ~/.claude/commands/review-plan.md"
@@ -146,7 +152,7 @@ echo "  Installation complete! Here's what you can do now:"
 echo ""
 echo "  ── OPTION 1: Manual (step by step) ──────────────────"
 echo ""
-echo "     /plan <description>          Create an implementation plan"
+echo "     /build-plan <description>    Create an implementation plan"
 echo "     /review-plan latest          Review the most recent plan"
 echo "     /implement <description>     Implement via the engineer agent"
 echo "     (tests & docs auto-run after implementation via Stop hook)"

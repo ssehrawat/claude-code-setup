@@ -14,7 +14,7 @@ User-facing entry points registered as Claude Code slash commands.
 
 | Command | File | Purpose |
 |---------|------|---------|
-| `/plan` | `commands/plan.md` | Interactive Q&A with planner agent |
+| `/build-plan` | `commands/build-plan.md` | Interactive Q&A with planner agent |
 | `/review-plan` | `commands/review-plan.md` | Review/approve a plan (never implements) |
 | `/implement` | `commands/implement.md` | Smart implement with complexity detection |
 | `/autopilot` | `commands/autopilot.md` | Full pipeline: plan, implement, test, docs |
@@ -26,7 +26,7 @@ Specialized personas delegated to via Claude Code's subagent system. Each agent 
 
 | Agent | File | Triggered By |
 |-------|------|-------------|
-| planner | `agents/planner.md` | `/plan`, `/autopilot` Step 1 |
+| planner | `agents/planner.md` | `/build-plan`, `/autopilot` Step 1 |
 | engineer | `agents/engineer.md` | `/implement`, `/autopilot` Step 2 |
 | qa-expert | `agents/qa-expert.md` | Stop hook, `/autopilot` Step 3 |
 | doc-maintainer | `agents/doc-maintainer.md` | Stop hook, `/autopilot` Step 4 |
@@ -43,12 +43,29 @@ Copies all files to `~/.claude/`, sets execute permissions on the hook, backs up
 
 Registers the Stop hook. No other hooks are configured. Previous versions used a `UserPromptSubmit` hook for turn-lock dedup; that was removed in favor of fingerprint-based dedup handled entirely within the Stop hook.
 
+### Bootstrap Detection
+
+Inline shell logic embedded at the top of `/build-plan`, `/autopilot`, and `/autopilot-from plan`. Triggers when ALL of the following are true: cwd contains none of `package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `.git/`, and has fewer than 3 non-hidden top-level entries.
+
+When triggered, the command sanitizes a project name (interactively prompted in `/build-plan`, auto-derived from `$ARGUMENTS` in autopilot flows), runs `mkdir <name> && cd <name>`, `git init` on `main`, writes a stack-agnostic `.gitignore`, and creates an initial commit. The rest of the pipeline runs inside the new directory.
+
+Skipped entirely in `/implement`, `/review-plan`, `/autopilot-from implement`, `/autopilot-from test`, and `/autopilot-from docs`.
+
+### Branch Creation
+
+Inline shell logic embedded between plan validation and engineer delegation in `/implement`, `/autopilot` Step 2, `/autopilot-from implement`, and `/autopilot-from plan`. Parses the plan's `id:` and `type:` from frontmatter, derives a branch name `<prefix>/<plan-id>-<slug>`, and runs `git checkout -b`.
+
+Skip conditions (in priority order): not in a git repo (silent skip), already on a non-`main`/`master` branch (silent skip), target branch already exists (loud bail — the autopilot flows also `rm -f .claude/.autopilot-active` before exiting).
+
+Skipped entirely in `/build-plan`, `/review-plan`, `/autopilot-from test`, and `/autopilot-from docs`.
+
 ## Data Flow
 
 ### Manual Mode
 
 ```
-User runs /plan
+User runs /build-plan
+  -> Phase 0: bootstrap detection; if triggered, prompt for name and cd into new dir
   -> planner subagent writes docs/plans/PLAN-NNN-slug.md
   -> returns to user for review
 
@@ -56,7 +73,8 @@ User runs /review-plan
   -> reviews plan, approves/rejects (never implements)
 
 User runs /implement PLAN-NNN
-  -> engineer subagent reads plan, implements code
+  -> Step 2.5: branch creation (creates feature/PLAN-NNN-slug from main/master, or skips)
+  -> engineer subagent reads plan, implements code on the feature branch
   -> Claude stops
   -> Stop hook fires
   -> update-docs.sh detects source changes, computes fingerprint
@@ -70,10 +88,13 @@ User runs /implement PLAN-NNN
 
 ```
 User runs /autopilot <description>
-  -> creates .claude/.autopilot-active sentinel
+  -> Step 0: bootstrap detection; if triggered, auto-derive name and cd into new dir
+  -> creates .claude/.autopilot-active sentinel (in possibly-new cwd)
   -> planner runs (auto mode, self-review)
   -> main agent validates plan
-  -> engineer implements
+  -> Step 1.75: branch creation (creates feature/PLAN-NNN-slug from main/master, or skips;
+       on branch-exists bail, removes sentinel before exiting)
+  -> engineer implements on the feature branch
   -> qa-expert runs tests
   -> doc-maintainer updates docs
   -> removes sentinel
@@ -103,7 +124,7 @@ Three layers prevent infinite loops:
   CLAUDE.md                  -- global code quality and convention rules
   settings.json              -- Stop hook registration (single hook)
   commands/
-    plan.md                  -- /plan slash command
+    build-plan.md            -- /build-plan slash command
     review-plan.md           -- /review-plan slash command
     implement.md             -- /implement slash command
     autopilot.md             -- /autopilot slash command

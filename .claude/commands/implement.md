@@ -75,11 +75,144 @@ summary: {one-line description}
 - **Scope:** {brief description of what would need to change}
 - **Why it needs a plan:** {which complexity signals triggered}
 
-Run `/plan {original request}` to go through the full planning process with Q&A, or if you're confident about the approach, run `/autopilot-from plan {original request}` to auto-plan and implement.
+Run `/build-plan {original request}` to go through the full planning process with Q&A, or if you're confident about the approach, run `/autopilot-from plan {original request}` to auto-plan and implement.
 
 If you're sure you want to skip planning, reply 'proceed anyway' and I'll create a lightweight plan and implement."
 
 If the user replies "proceed anyway" (or similar), create a lightweight plan and proceed to Step 3.
+
+---
+
+## Step 2.5: Branch Creation
+
+Before delegating to the engineer, create a feature branch from the plan's frontmatter so engineer-written changes land off `main`/`master`. In `/implement` (manual mode) the user is prompted with the auto-derived name as a suggestion and may override it. Autopilot flows handle their own silent derivation in their own commands — this step is `/implement`-specific.
+
+**Resolve the plan file path.** There are two cases:
+1. **Existing PLAN-NNN was passed in `$ARGUMENTS`** (e.g. `/implement PLAN-007`): glob `./docs/plans/PLAN-NNN-*.md`. If zero matches, error out with "No plan file found for PLAN-NNN". If multiple matches, error out with "Multiple plan files matched PLAN-NNN — refusing to guess".
+2. **Lightweight plan was just written in Step 2:** the path is the file you wrote moments ago (you know it from the immediately-prior write). Use it directly.
+
+### Step 2.5a: Skip-conditions and suggestion derivation
+
+Run the block below with the resolved plan file path passed as `$1`. This block evaluates skip conditions and derives a suggested branch name; it does NOT create the branch.
+
+```bash
+# Inputs: the plan file path, e.g. ./docs/plans/PLAN-001-add-auth.md
+PLAN_FILE="$1"
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "BRANCH_ACTION=skip-not-in-repo"
+  exit 0
+fi
+
+current_branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$current_branch" != "main" ] && [ "$current_branch" != "master" ]; then
+  echo "BRANCH_ACTION=skip-already-on-feature:$current_branch"
+  exit 0
+fi
+
+# Parse plan frontmatter for id and type.
+# Frontmatter is between two lines of exactly '---'. The tr pipeline strips
+# any surrounding single or double quotes so `type: "feature"` and
+# `type: feature` both parse identically; lowercasing on type lets
+# `type: Bugfix` map correctly.
+plan_id=$(awk '/^---$/{f++; next} f==1 && /^id:/ {print $2; exit}' "$PLAN_FILE" | tr -d '"' | tr -d "'")
+plan_type=$(awk '/^---$/{f++; next} f==1 && /^type:/ {print $2; exit}' "$PLAN_FILE" | tr -d '"' | tr -d "'" | tr '[:upper:]' '[:lower:]')
+
+if [ -z "$plan_id" ] || [ -z "$plan_type" ]; then
+  echo "ERROR: could not parse id/type from $PLAN_FILE frontmatter"
+  exit 1
+fi
+
+# Derive slug from filename: PLAN-001-add-auth.md -> add-auth
+plan_basename=$(basename "$PLAN_FILE" .md)
+slug=$(printf '%s' "$plan_basename" | sed -E "s/^${plan_id}-//")
+# WHY: no case-insensitive flag — plan IDs are always uppercase ("PLAN-001") and
+# filenames match. The GNU sed -I flag is unsupported on BSD sed (macOS), so
+# omitting it keeps this portable across Git Bash on Windows and macOS/Linux.
+
+case "$plan_type" in
+  feature|design) prefix="feature" ;;
+  bugfix)        prefix="fix" ;;
+  refactoring)   prefix="refactor" ;;
+  *)             prefix="feature" ;;
+esac
+
+SUGGESTED_BRANCH="${prefix}/${plan_id}-${slug}"
+echo "SUGGESTED_BRANCH=${SUGGESTED_BRANCH}"
+```
+
+### Step 2.5b: Branch from `BRANCH_ACTION` line
+
+Read the block's output:
+- `BRANCH_ACTION=skip-not-in-repo` or `BRANCH_ACTION=skip-already-on-feature:*` → skip the prompt entirely and continue to Step 3. Do NOT show a suggestion. Do NOT run the second bash block.
+- `ERROR: ...` (exit 1) → STOP the pipeline and surface the error verbatim.
+- `SUGGESTED_BRANCH=<name>` → proceed to Step 2.5c.
+
+### Step 2.5c: Prompt the user
+
+Capture `SUGGESTED_BRANCH` from the previous block's output. Show the user this exact prompt and wait for their reply:
+
+```
+Suggested branch: <SUGGESTED_BRANCH>
+Press Enter to accept, or type a different name (e.g. fix/auth-bug, feature/team/auth):
+```
+
+Decide the chosen name:
+1. **Empty reply** (user pressed Enter) → set `CHOSEN_BRANCH = SUGGESTED_BRANCH`. Skip directly to Step 2.5e.
+2. **Non-empty reply** → run the sanitize block in Step 2.5d with the raw input as `$1`, then validate.
+
+### Step 2.5d: Sanitize and validate user input (re-prompt up to 3 times)
+
+Run this block with the raw user reply as `$1`. The pipeline is intentionally looser than project-name sanitize — `/` is preserved because branch prefixes use it (e.g. `feature/team/auth`).
+
+```bash
+# $1 = raw user input
+SANITIZED=$(printf '%s' "$1" \
+  | tr '[:upper:]' '[:lower:]' \
+  | tr ' _' '--' \
+  | sed -E 's/[^a-z0-9/-]//g; s/-+/-/g; s/^-+//; s/-+$//')
+
+if [ -z "$SANITIZED" ]; then
+  echo "ERROR: branch name is empty after sanitization"
+  exit 3
+fi
+
+if ! git check-ref-format --branch "$SANITIZED" >/dev/null 2>&1; then
+  echo "ERROR: $SANITIZED is not a valid git branch name"
+  exit 3
+fi
+
+echo "CHOSEN_BRANCH=${SANITIZED}"
+```
+
+Branch on the result:
+- `CHOSEN_BRANCH=<name>` → proceed to Step 2.5e with that name.
+- `ERROR: ...` (exit 3) → re-prompt the user, showing the sanitized form (if any) and the failure reason. Allow up to **3 total attempts**. After the 3rd failed attempt, STOP the pipeline with:
+  ```
+  ERROR: could not obtain a valid branch name after 3 attempts.
+  Resolution: re-run /implement and supply a name matching git's branch ref format (e.g. feature/auth, fix/PLAN-007-cors).
+  ```
+  Do NOT invoke the engineer.
+
+### Step 2.5e: Create the branch
+
+Run this block with the chosen branch name as `$1`.
+
+```bash
+# $1 = user-chosen branch name (or accepted suggestion)
+CHOSEN="$1"
+if git rev-parse --verify "$CHOSEN" >/dev/null 2>&1; then
+  echo "ERROR: branch $CHOSEN already exists"
+  echo "Resolution: try a different name, delete the old branch (git branch -D $CHOSEN), or supersede the plan."
+  exit 2
+fi
+git checkout -b "$CHOSEN"
+echo "BRANCH_ACTION=created:$CHOSEN"
+```
+
+Read the result:
+- `BRANCH_ACTION=created:*` → continue to Step 3 and mention the new branch in the user-facing summary.
+- `ERROR: branch ... already exists` (exit 2) → re-prompt the user for a different name and loop back to Step 2.5d. The "branch already exists" attempt counts toward the same 3-attempt budget as sanitize/validate failures. After exhausting the budget, STOP the pipeline and surface the error verbatim. Do NOT invoke the engineer.
 
 ---
 

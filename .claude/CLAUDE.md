@@ -53,7 +53,7 @@ After making significant code changes, the following MUST be checked and updated
 Two modes of operation:
 
 ### Manual (step by step)
-- `/plan` → creates implementation plan via the **planner** agent
+- `/build-plan` → creates implementation plan via the **planner** agent
 - `/review-plan` → review and approve the plan
 - `/implement` → delegates to the **engineer** agent for production-grade implementation
 - After implementation, **qa-expert** and **doc-maintainer** run automatically via Stop hook

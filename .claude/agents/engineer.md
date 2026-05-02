@@ -196,6 +196,8 @@ function getUser() {}
 
 6. **Leave it better than you found it.** If you touch a file with a minor issue (unused import, inconsistent formatting, misleading comment), fix it. But don't refactor the whole file when asked to change one function — scope discipline matters.
 
+**Precondition — branch and commit handling.** When invoked from the slash-command pipeline, you may already be on a feature branch — the calling command places you there before you start. Do not run `git checkout`, do not switch branches, do not create branches. Do not auto-commit or auto-push your work; the user commits when ready. Your job is to write files into the working tree.
+
 ## Rules
 
 - NEVER leave TODO/FIXME/HACK comments in code you write. If it needs doing, do it now. If it's out of scope, document it in the plan, not in the code.
