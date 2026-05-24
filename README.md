@@ -19,6 +19,8 @@ Installs to `~/.claude/` → applies globally to all projects.
 
 **Re-running:** Safe to run again on updates. Backs up existing `settings.json` and auto-cleans renamed files from previous versions.
 
+**Remote Control auto-start:** The installer patches `~/.claude/settings.json` to set `remoteControlAtStartup: true` after copying. This auto-starts the Remote Control bridge (which powers claude.ai/code and `claude remote-control`) at every Claude Code session, so you never have to toggle it per-session.
+
 ## Usage
 
 ### Option 1: Manual (Step by Step)
@@ -288,7 +290,7 @@ Add to your project's `.gitignore`:
 ```
 ~/.claude/
 ├── CLAUDE.md                      ← code quality + doc standard rules
-├── settings.json                  ← Stop hook registration
+├── settings.json                  ← Stop hook registration + remoteControlAtStartup: true (patched at install)
 ├── commands/
 │   ├── build-plan.md              ← /build-plan (interactive Q&A)
 │   ├── review-plan.md             ← /review-plan (review only, never implements)

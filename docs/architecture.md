@@ -39,9 +39,13 @@ The single hook registered in `settings.json` under the `Stop` event. Fires ever
 
 Copies all files to `~/.claude/`, sets execute permissions on the hook, backs up existing `settings.json`, and cleans up artifacts from previous versions (turn-lock files, session-state dirs, renamed agents).
 
+After copying `settings.json`, the installer runs a node one-liner that re-reads `~/.claude/settings.json` and sets `remoteControlAtStartup: true`. This is patched at install time (not stored in the source `.claude/settings.json`) so the Remote Control bridge auto-starts every session without a per-session toggle, while the source settings file stays minimal.
+
 ### Settings (`settings.json`)
 
 Registers the Stop hook. No other hooks are configured. Previous versions used a `UserPromptSubmit` hook for turn-lock dedup; that was removed in favor of fingerprint-based dedup handled entirely within the Stop hook.
+
+The source `.claude/settings.json` in this repo does NOT contain `remoteControlAtStartup`. That key is injected into `~/.claude/settings.json` by `install.sh` after the copy step (see Installer above).
 
 ### Bootstrap Detection
 

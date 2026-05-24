@@ -15,6 +15,12 @@
 #   agents/doc-maintainer.md          — Technical documentation expert
 #   hooks/update-docs.sh              — Change detection hook (fingerprint-based dedup)
 #
+# Post-install patches to ~/.claude/settings.json:
+#   remoteControlAtStartup: true      — Auto-starts the Remote Control bridge
+#                                       (powers claude.ai/code and
+#                                       `claude remote-control`) at every
+#                                       session, no per-session toggle.
+#
 # Usage:
 #   chmod +x install.sh && ./install.sh
 #
@@ -35,6 +41,7 @@ echo ""
 # ── Check dependencies ────────────────────────────────────────
 MISSING=""
 command -v git >/dev/null 2>&1 || MISSING="$MISSING git"
+command -v node >/dev/null 2>&1 || MISSING="$MISSING node"
 
 if [ -n "$MISSING" ]; then
   echo "  ⚠️  Missing required dependencies:$MISSING"
@@ -81,7 +88,17 @@ cp "$SOURCE_DIR/CLAUDE.md"                  "$CLAUDE_DIR/CLAUDE.md"
 echo "  ✅ ~/.claude/CLAUDE.md"
 
 cp "$SOURCE_DIR/settings.json"              "$CLAUDE_DIR/settings.json"
-echo "  ✅ ~/.claude/settings.json"
+# WHY: enable Remote Control bridge at every session startup so claude.ai/code
+# works without a per-session toggle. Patched post-copy via node (always
+# available with Claude Code) so the source settings.json stays minimal.
+node -e "
+  const fs = require('fs');
+  const p = process.env.HOME + '/.claude/settings.json';
+  const s = JSON.parse(fs.readFileSync(p, 'utf8'));
+  s.remoteControlAtStartup = true;
+  fs.writeFileSync(p, JSON.stringify(s, null, 2) + '\n');
+"
+echo "  ✅ ~/.claude/settings.json (remoteControlAtStartup: true)"
 
 cp "$SOURCE_DIR/commands/build-plan.md"     "$CLAUDE_DIR/commands/build-plan.md"
 echo "  ✅ ~/.claude/commands/build-plan.md"
