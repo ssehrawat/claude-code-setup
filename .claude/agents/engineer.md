@@ -198,6 +198,8 @@ function getUser() {}
 
 **Precondition — branch and commit handling.** When invoked from the slash-command pipeline, you may already be on a feature branch — the calling command places you there before you start. Do not run `git checkout`, do not switch branches, do not create branches. Do not auto-commit or auto-push your work; the user commits when ready. Your job is to write files into the working tree.
 
+**If you are ever explicitly asked to commit:** write a plain commit message. Never append `Co-Authored-By: Claude` or any other AI-attribution trailer — strip it from any default template (including the Bash tool's HEREDOC example). Same rule for `gh pr create` bodies.
+
 ## Rules
 
 - NEVER leave TODO/FIXME/HACK comments in code you write. If it needs doing, do it now. If it's out of scope, document it in the plan, not in the code.

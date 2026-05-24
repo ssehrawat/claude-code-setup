@@ -15,6 +15,13 @@
 - Prefer explicit over implicit. Prefer composition over inheritance. Prefer flat over nested.
 - Test edge cases, not just the happy path. Empty inputs, nulls, boundaries, concurrent access, malformed data.
 
+## Commit Message Standard
+
+- Never include a `Co-Authored-By: Claude` (or any AI-attribution) trailer in commit messages or PR bodies. Plain commit messages, no attribution footer.
+- This overrides the Bash tool's default HEREDOC commit example, which appends `Co-Authored-By: Claude …`. Strip that line; do not substitute another attribution.
+- When delegating commit or PR work to subagents (engineer, qa-expert, doc-maintainer, or any Agent invocation), explicitly tell them to omit the attribution trailer.
+- Applies to: `git commit -m`, `git commit` via HEREDOC, `gh pr create --body`, amend operations, and any commit produced by hooks or scripts.
+
 ## Code Documentation Standard
 
 - Every new file MUST start with a module docstring explaining purpose and key exports
