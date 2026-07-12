@@ -1,6 +1,6 @@
 # Claude Code — Auto Plan & Doc Maintenance Setup
 
-Global Claude Code configuration with expert AI agents that handle planning, implementation, testing, and documentation. Two modes of operation — manual (you drive each step) or autopilot (hands-free).
+Global Claude Code configuration with expert AI agents that handle planning, implementation, code review, testing, and documentation. Two modes of operation — manual (you drive each step) or autopilot (hands-free).
 
 ## Quick Install
 
@@ -59,8 +59,10 @@ Runs the entire chain hands-free:
 Step 1:   planner    → writes plan (auto-approved + self-review)
 Step 1.5: validation → main agent sanity-checks the plan
 Step 2:   engineer   → implements everything from the plan
+Step 2.5: reviewer   → adversarial diff review (blockers trigger a fix loop, cap 2)
 Step 3:   qa-expert  → writes tests, runs them, fixes failures
 Step 4:   doc-maint  → creates/updates all documentation
+Step 4.5: deliver    → commit + push + PR (ONLY with --deliver/--deploy)
 Step 5:   summary    → reports what was done
 ```
 
@@ -78,6 +80,33 @@ Step 5:   summary    → reports what was done
 /review-plan PLAN-001                          ← approve
 /autopilot-from implement PLAN-001             ← rest runs hands-free
 ```
+
+### Code Review
+
+Every autopilot run that implements code reviews the engineer's diff before tests: the **reviewer** agent critiques the changes against `.claude/CLAUDE.md` standards (correctness, error handling, AI slop, type safety, security smells) and emits blocker/should-fix/nit findings. Blockers dispatch the engineer for a fix pass, then a re-review — capped at 2 iterations so a hands-free run always terminates. Blockers that survive the cap are recorded as `blockers-remaining` and, with `--deliver`, turn the PR into a **draft** with the blockers listed in the body. Runs resumed at `test` or `docs` skip the review — there is nothing new to review.
+
+For the manual flow, `/review` runs the same reviewer once over your working-tree diff and prints the report. It never fixes anything and never invokes another agent — you decide what to do with the findings.
+
+### Opt-in Delivery (`--deliver` / `--deploy`)
+
+By default, no autopilot run ever touches a remote — it stops at a local feature branch exactly as before. Delivery is activated only by an explicit flag:
+
+```
+/autopilot --deliver add rate limiting         ← plan → … → docs, then commit + push + PR
+/autopilot-from test PLAN-003 --deliver        ← resume at tests, still delivers at the end
+```
+
+**The flag is the confirmation.** Autopilot's contract is "never stop, never ask" — a mid-run "OK to push?" prompt would hang a hands-free run. Instead, consent for outward-facing actions (commit, push, PR) is captured up front by typing the flag. No flag, no remote access — guaranteed.
+
+What delivery does:
+- Commits everything on the feature branch with a Conventional Commit subject derived from the plan (`feat: add auth (PLAN-007)`). **No AI-attribution trailer**, ever.
+- Pushes only when the run actually created a commit (or the branch has unpushed commits from an earlier run) — never a blind push.
+- Opens a PR whose body is synthesized from the plan: Goals, Test summary, Rollback. Opened as a **draft** if the review recorded unresolved blockers; otherwise ready.
+- Degrades gracefully: missing `gh`, no auth, no remote, or on `main`/`master` → recorded skip, never a crash.
+- Fails loudly when git fails: a failing commit (unreadable message file, pre-commit hook) or a rejected push ends delivery with a distinct `commit-failed`/`push-failed` outcome — never misreported as "nothing to commit". Staged work is left intact, nothing is retried, no PR is opened.
+- In `/autopilot-from`, delivery is **flag-gated, not stage-gated**: a run resumed at `test` or `docs` still delivers when the flag is present.
+
+`--deploy` implies `--deliver`; the deploy stage itself is a later phase and is currently a no-op. Merging is always a human decision — nothing auto-merges.
 
 ### Smart /implement (Complexity Detection)
 
@@ -111,7 +140,7 @@ When you run `/build-plan` or `/autopilot` from an empty or non-project director
 
 The command then runs `mkdir <name> && cd <name>`, `git init` on `main`, writes a stack-agnostic `.gitignore`, and creates an initial commit. From there the rest of the pipeline operates inside the new directory — plans land in `./<name>/docs/plans/`, the engineer scaffolds files inside `./<name>/`.
 
-**Skip conditions:** Bootstrapping does NOT run for `/implement`, `/review-plan`, `/autopilot-from implement`, `/autopilot-from test`, or `/autopilot-from docs`. Those flows assume the project already exists.
+**Skip conditions:** Bootstrapping does NOT run for `/implement`, `/review-plan`, `/review`, `/autopilot-from implement`, `/autopilot-from test`, or `/autopilot-from docs`. Those flows assume the project already exists. `/implement` goes one step further: in a non-project directory it refuses and redirects you to `/build-plan` or `/autopilot` — implementing presupposes a plan, and bootstrapping without one would create a repo with no plan and no branch policy.
 
 **Pre-flight requirement:** Bootstrap requires `git config --global user.email` and `user.name` to be set. If either is missing the bootstrap aborts with a clear error before creating the initial commit.
 
@@ -141,7 +170,7 @@ Before the engineer agent writes any files, the pipeline creates a feature branc
 2. Current branch is anything other than `main` or `master` → skip silently. The user already chose their branch.
 3. Current branch is `main`/`master` and the target branch already exists → STOP the pipeline with an error that names the branch and gives recovery options. In manual mode the user is re-prompted (counted toward the same 3-attempt budget); in autopilot the run aborts and the `.claude/.autopilot-active` sentinel is removed so the next run isn't blocked.
 
-**Commands that never branch:** `/build-plan`, `/review-plan`, `/autopilot-from test`, `/autopilot-from docs`.
+**Commands that never branch:** `/build-plan`, `/review-plan`, `/review`, `/autopilot-from test`, `/autopilot-from docs`.
 
 **Recovery if engineer fails on a freshly-created branch:**
 - Branch is empty (no commits) and you want to throw it out: `git checkout main && git branch -D <branch>`.
@@ -155,17 +184,19 @@ Before the engineer agent writes any files, the pipeline creates a feature branc
 | `/build-plan <description>` | Interactive Q&A → detailed plan in `./docs/plans/` |
 | `/review-plan <id\|latest\|all>` | Review and approve plans (never implements) |
 | `/implement <description or PLAN-ID>` | Smart implement with complexity detection |
-| `/autopilot <description>` | Full chain: plan → implement → test → docs |
-| `/autopilot-from <stage> <args>` | Resume from: `plan`, `implement`, `test`, or `docs` |
+| `/review` | Adversarial review of working-tree changes (report only, never fixes) |
+| `/autopilot <description> [--deliver\|--deploy]` | Full chain: plan → implement → review → test → docs (+ PR with flag) |
+| `/autopilot-from <stage> <args> [--deliver\|--deploy]` | Resume from: `plan`, `implement`, `test`, or `docs` |
 
 ## Expert Agents
 
-All agents inherit the model from your current session (Opus, Sonnet, etc.). No model is hardcoded.
+All agents inherit the model from your current session (Opus, Sonnet, etc.), with one exception: the reviewer pins `claude-opus-4-8` — adversarial critique is the gate where a missed defect ships, so it always gets the top tier.
 
 | Agent | Persona | When It Runs |
 |-------|---------|-------------|
 | **planner** | Principal architect (Google/Stripe-level). In manual mode, asks focused questions with recommendations. In auto mode, makes autonomous decisions with self-review. | `/build-plan`, or Step 1 of `/autopilot` |
 | **engineer** | Distinguished principal engineer (Cloudflare/Stripe/SQLite-level). Production-grade code. Zero AI slop. Every file has module docstrings, WHY comments, and intent-focused function docs. | `/implement`, or Step 2 of `/autopilot` |
+| **reviewer** | Adversarial diff reviewer. Read-only by design (no Write/Edit tools) — a reviewer that can edit is a second engineer. Emits blocker/should-fix/nit findings with a machine-readable verdict. | `/review`, or Step 2.5 of `/autopilot` |
 | **qa-expert** | Principal QA engineer (Netflix/NASA-level). Thinks like an attacker. Tests edge cases, boundaries, error paths, concurrency — not just happy paths. | Auto via Stop hook, or Step 3 of `/autopilot` |
 | **doc-maintainer** | Staff technical writer (Stripe/Vercel-level). Every sentence earns its place. Creates and maintains all project documentation. | Auto via Stop hook, or Step 4 of `/autopilot` |
 
@@ -243,10 +274,22 @@ Autopilot sentinel (.claude/.autopilot-active) present?
   Stale (>2h)? → delete sentinel + warn, continue
   Fresh?       → save fingerprint + exit 0 (autopilot handles agents itself)
   ↓
+Autopilot finished-marker (.claude/.autopilot-finished) present?
+  YES → save fingerprint + consume marker + exit 0
+        (covers single-turn autopilot runs, where the hook never
+         fires while the sentinel exists)
+  ↓
 Source files changed? (git diff HEAD + untracked)
   NO  → exit 0
   ↓
 Compute fingerprint (hash of sorted source file list)
+  ↓
+First Stop of this session?
+  YES → save fingerprint as session baseline + exit 0
+        (a dirty tree that predates the session never triggers agents)
+  ↓
+Fingerprint equals the session baseline?
+  YES → exit 0 (nothing changed during this session)
   ↓
 Fingerprint matches last-processed?
   YES → exit 0 (already handled)
@@ -269,6 +312,7 @@ User writes more code → Stop fires → new fingerprint → trigger ✓
 1. **Claude Code's built-in `stop_hook_active` flag** — if the hook already caused Claude to continue once, this flag is true on the next fire and the hook exits immediately
 2. **Fingerprint file** — hash of the processed file list, keyed by session; same files = same hash = skip
 3. **Autopilot sentinel** (`.claude/.autopilot-active`) — short-circuits the hook during `/autopilot` runs (saves the fingerprint so post-autopilot fires also skip). Stale sentinels older than 2 hours are auto-cleaned.
+4. **Autopilot finished-marker** (`.claude/.autopilot-finished`) — an autopilot run that starts and finishes within a single turn never fires the hook while its sentinel exists (Stop only fires between turns), so safety net 3 never saves the fingerprint. At cleanup, autopilot touches this marker; the hook's next fire saves the fingerprint, consumes the marker, and skips — instead of re-triggering agents on work the run already tested and documented. The command can't save the fingerprint itself because the fingerprint file is keyed by `session_id`, which only the hook receives.
 
 ### Debug log
 
@@ -283,6 +327,7 @@ Claude Code's UI sometimes displays "Stop hook error" even when the hook is work
 Add to your project's `.gitignore`:
 ```
 .claude/.autopilot-active
+.claude/.autopilot-finished
 ```
 
 ## Files Installed
@@ -294,12 +339,14 @@ Add to your project's `.gitignore`:
 ├── commands/
 │   ├── build-plan.md              ← /build-plan (interactive Q&A)
 │   ├── review-plan.md             ← /review-plan (review only, never implements)
+│   ├── review.md                  ← /review (code review, report only)
 │   ├── implement.md               ← /implement (smart complexity detection)
 │   ├── autopilot.md               ← /autopilot (full chain)
 │   └── autopilot-from.md          ← /autopilot-from (resume from any stage)
 ├── agents/
 │   ├── planner.md                 ← planning expert
 │   ├── engineer.md                ← coding expert
+│   ├── reviewer.md                ← adversarial diff reviewer
 │   ├── qa-expert.md               ← testing expert
 │   └── doc-maintainer.md          ← documentation expert
 └── hooks/
