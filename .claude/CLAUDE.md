@@ -63,10 +63,13 @@ Two modes of operation:
 - `/build-plan` → creates implementation plan via the **planner** agent
 - `/review-plan` → review and approve the plan
 - `/implement` → delegates to the **engineer** agent for production-grade implementation
+- `/review` → adversarial diff review via the **reviewer** agent (report only, never fixes)
 - After implementation, **qa-expert** and **doc-maintainer** run automatically via Stop hook
 
 ### Autopilot (fully automated)
-- `/autopilot` → runs the entire chain: plan → implement → test → docs
+- `/autopilot` → runs the entire chain: plan → implement → review → test → docs
+- The **reviewer** gates between implement and test: blockers dispatch an engineer fix pass then a re-review, capped at 2 iterations; surviving blockers are recorded, never silently dropped
+- `--deliver` (or `--deploy`, which implies it) adds a delivery stage: commit (Conventional Commit, no AI-attribution trailer), push, open a PR (draft if blockers remain). OFF by default — without the flag nothing touches a remote
 - No human intervention needed. Plan is auto-approved. All agents run in sequence.
 
 These agents run as subagents to preserve your main context window

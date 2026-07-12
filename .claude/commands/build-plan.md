@@ -75,6 +75,7 @@ __pycache__/
 .env.local
 .DS_Store
 .claude/.autopilot-active
+.claude/.autopilot-finished
 .claude/settings.local.json
 EOF
 

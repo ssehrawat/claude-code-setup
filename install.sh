@@ -6,11 +6,13 @@
 #   settings.json                     — Stop hook wiring
 #   commands/build-plan.md            — /build-plan slash command
 #   commands/review-plan.md           — /review-plan slash command
+#   commands/review.md                — /review slash command (code review)
 #   commands/implement.md             — /implement slash command
 #   commands/autopilot.md             — /autopilot slash command
 #   commands/autopilot-from.md        — /autopilot-from slash command
 #   agents/planner.md                 — Implementation planning expert
 #   agents/engineer.md                — Implementation coding expert
+#   agents/reviewer.md                — Adversarial diff review expert
 #   agents/qa-expert.md               — QA & testing expert
 #   agents/doc-maintainer.md          — Technical documentation expert
 #   hooks/update-docs.sh              — Change detection hook (fingerprint-based dedup)
@@ -112,6 +114,9 @@ fi
 cp "$SOURCE_DIR/commands/review-plan.md"    "$CLAUDE_DIR/commands/review-plan.md"
 echo "  ✅ ~/.claude/commands/review-plan.md"
 
+cp "$SOURCE_DIR/commands/review.md"         "$CLAUDE_DIR/commands/review.md"
+echo "  ✅ ~/.claude/commands/review.md"
+
 cp "$SOURCE_DIR/commands/implement.md"     "$CLAUDE_DIR/commands/implement.md"
 echo "  ✅ ~/.claude/commands/implement.md"
 
@@ -132,6 +137,9 @@ if [ -f "$CLAUDE_DIR/agents/coder.md" ]; then
   rm "$CLAUDE_DIR/agents/coder.md"
   echo "  🧹 Removed old ~/.claude/agents/coder.md (renamed to engineer.md)"
 fi
+
+cp "$SOURCE_DIR/agents/reviewer.md"         "$CLAUDE_DIR/agents/reviewer.md"
+echo "  ✅ ~/.claude/agents/reviewer.md"
 
 cp "$SOURCE_DIR/agents/qa-expert.md"        "$CLAUDE_DIR/agents/qa-expert.md"
 echo "  ✅ ~/.claude/agents/qa-expert.md"
@@ -172,11 +180,14 @@ echo ""
 echo "     /build-plan <description>    Create an implementation plan"
 echo "     /review-plan latest          Review the most recent plan"
 echo "     /implement <description>     Implement via the engineer agent"
+echo "     /review                      Adversarial code review of the working tree"
 echo "     (tests & docs auto-run after implementation via Stop hook)"
 echo ""
 echo "  ── OPTION 2: Autopilot (fully automated) ───────────"
 echo ""
-echo "     /autopilot <description>     Full chain: Plan → Implement → Test → Docs"
+echo "     /autopilot <description>     Full chain: Plan → Implement → Review → Test → Docs"
+echo "     /autopilot --deliver <desc>  Same chain, then commit + push + open a PR"
+echo "                                  (delivery is OFF by default — no flag, no remote)"
 echo "     /autopilot-from <stage> ...  Resume from any stage:"
 echo "       /autopilot-from plan ...         Start from planning (same as /autopilot)"
 echo "       /autopilot-from implement PLAN-003  Skip planning, use existing plan"
@@ -185,7 +196,8 @@ echo "       /autopilot-from docs                Only update documentation"
 echo ""
 echo "  🤖 AGENTS"
 echo "     planner                      Principal architect"
-echo "     engineer                        Distinguished principal engineer"
+echo "     engineer                     Distinguished principal engineer"
+echo "     reviewer                     Adversarial diff reviewer (gates before docs/PR)"
 echo "     qa-expert                    Principal QA engineer"
 echo "     doc-maintainer               Staff technical writer"
 echo ""

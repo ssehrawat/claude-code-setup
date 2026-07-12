@@ -1,17 +1,52 @@
 AUTOMODE — Resume the autopilot pipeline from a specific stage for: $ARGUMENTS
 
-Parse the FIRST word of $ARGUMENTS (after "AUTOMODE") to determine the starting stage. The rest is the task description or plan reference.
+## Flag Parsing (run first)
+
+`$ARGUMENTS` may contain delivery flags mixed into the stage keyword and task description. Strip them FIRST, before parsing the stage. Run this block with the raw `$ARGUMENTS` string as `$1`:
+
+```bash
+# Inputs: the raw $ARGUMENTS string. Recognized flags may appear anywhere in it.
+# WHY strip before stage/task derivation: flags must not be mistaken for the
+# stage keyword, and must not leak into the Step 0 auto-derived project name.
+RAW_ARGS="$1"
+DELIVER=0
+DEPLOY=0
+TASK=""
+# WHY set -f: the unquoted $RAW_ARGS word-split is intentional, but without
+# noglob a task containing * or ? would expand to cwd filenames and corrupt
+# the stage/task text (and the Step 0 auto-derived project name).
+set -f
+for word in $RAW_ARGS; do
+  case "$word" in
+    --deliver) DELIVER=1 ;;
+    --deploy)  DEPLOY=1; DELIVER=1 ;;  # --deploy implies --deliver
+    *)         TASK="$TASK $word" ;;
+  esac
+done
+set +f
+TASK=${TASK# }
+echo "DELIVER=$DELIVER"
+echo "DEPLOY=$DEPLOY"
+echo "TASK=$TASK"
+```
+
+`DELIVER=1` activates Step 4.5. `DEPLOY=1` currently only implies `--deliver`; the deploy stage itself is Phase 3 of the outer-loop plan and is a no-op today. Without a flag, this pipeline never touches a remote — the upfront flag IS the confirmation, so the run stays hands-free either way.
+
+Parse the FIRST word of `TASK` (the flag-stripped remainder) to determine the starting stage. The rest is the task description or plan reference.
 
 **Stage keywords** (case-insensitive):
-- `plan` → Start from Step 1 (Plan → Review → Implement → Test → Docs)
-- `implement` → Start from Step 2 (Implement → Test → Docs). Requires a plan ID like PLAN-001.
-- `test` → Start from Step 3 (Test → Docs). Assumes code is already written.
+- `plan` → Start from Step 1 (Plan → Implement → Review → Test → Docs)
+- `implement` → Start from Step 2 (Implement → Review → Test → Docs). Requires a plan ID like PLAN-001.
+- `test` → Start from Step 3 (Test → Docs). Assumes code is already written and reviewed.
 - `docs` → Start from Step 4 (Docs only). Assumes code and tests are done.
+
+**Stage-skipping vs. flag-gating:** only Review (Step 2.5) is stage-skipped — a `test` or `docs` start has nothing new to review. Deliver (Step 4.5) is flag-gated, NOT stage-gated: a run resumed at `test` or `docs` still delivers when `--deliver`/`--deploy` was passed, because a resumed run must be able to ship.
 
 **Examples:**
 - `/autopilot-from plan add user authentication` → full pipeline
 - `/autopilot-from implement PLAN-003` → skip planning, implement from existing plan
 - `/autopilot-from test PLAN-003` → skip planning and coding, run tests and docs
+- `/autopilot-from test PLAN-003 --deliver` → tests + docs, then commit, push, and open a PR
 - `/autopilot-from docs` → only update documentation for recent changes
 
 ---
@@ -42,7 +77,7 @@ echo "NEEDS_BOOTSTRAP=$NEEDS_BOOTSTRAP"
 
 **If `NEEDS_BOOTSTRAP=0`:** Skip to sentinel creation below.
 
-**If `NEEDS_BOOTSTRAP=1`:** Auto-derive the project name from the task description portion of `$ARGUMENTS` (everything after the `plan` keyword), passed as `$1`:
+**If `NEEDS_BOOTSTRAP=1`:** Auto-derive the project name from the task description portion of `TASK` (the flag-stripped remainder from Flag Parsing, everything after the `plan` keyword), passed as `$1`:
 
 ```bash
 # Inputs: the raw $ARGUMENTS string passed to /autopilot.
@@ -99,6 +134,7 @@ __pycache__/
 .env.local
 .DS_Store
 .claude/.autopilot-active
+.claude/.autopilot-finished
 .claude/settings.local.json
 EOF
 
@@ -121,7 +157,7 @@ Read `pwd`. The new directory is the project root for all subsequent steps. If b
 
 ---
 
-**IMPORTANT — Sentinel file:** Now (in the possibly-new cwd) create `.claude/.autopilot-active` to prevent the Stop hook from double-triggering. Delete it at the end. Note: stale sentinels older than 2 hours are auto-cleaned by the Stop hook, so a crash won't permanently block agent triggers.
+**IMPORTANT — Sentinel file:** Now (in the possibly-new cwd) create `.claude/.autopilot-active` to prevent the Stop hook from double-triggering. At the end of the run (Step 5), the cleanup replaces it with a `.claude/.autopilot-finished` marker that the hook consumes on its next fire to save the run's fingerprint — this covers single-turn runs where the hook never fires while the sentinel exists. Note: stale sentinels older than 2 hours are auto-cleaned by the Stop hook, so a crash won't permanently block agent triggers.
 
 ```bash
 mkdir -p .claude && touch .claude/.autopilot-active
@@ -228,6 +264,22 @@ Delegate to the **engineer** subagent:
 - Implement everything with production-grade quality
 - Update the plan status to `implemented`
 
+## Step 2.5: Review (skip when starting stage is `test` or `docs`)
+
+**Skip this step entirely when the starting stage is `test` or `docs`** — those resumes carry nothing new to review. This is the ONLY step that is stage-skipped; Deliver (Step 4.5) remains flag-gated and still runs on a `test`/`docs` resume when `--deliver`/`--deploy` was passed.
+
+When starting stage is `plan` or `implement`, delegate to the **reviewer** subagent to adversarially critique the Step 2 diff before tests run:
+- It reviews the working-tree diff (`git diff HEAD` plus untracked files) against `.claude/CLAUDE.md` standards and the plan's `## Acceptance Criteria` (if present)
+- Its final output line is machine-readable: `REVIEW_VERDICT=approve BLOCKERS=0` or `REVIEW_VERDICT=changes-requested BLOCKERS=<n>`
+
+Parse that final line and apply the bounded fix loop:
+
+1. `REVIEW_VERDICT=approve` (or `BLOCKERS=0`) → record `review: approved` and continue to Step 3.
+2. Otherwise, delegate to the **engineer** subagent with the reviewer's **Blockers** list as the fix brief — fix ONLY the listed blockers, no scope creep — then delegate to the reviewer again and re-parse its final line.
+3. Hard cap: at most **2** fix/re-review iterations after the initial review. If blockers remain after the cap, record `review: blockers-remaining` and continue to Step 3 anyway — a hands-free pipeline must terminate. This outcome feeds the Step 5 summary and, when `--deliver` was passed, makes Step 4.5 open the PR as a **draft** with the remaining blockers listed in the body.
+
+WHY the loop lives in this command and not in the reviewer agent: agents are stateless single-shot subagents; orchestration and loop caps belong in the command layer, exactly as the branch-creation retry budget lives in the calling command rather than in the engineer.
+
 ## Step 3: Test (skip if starting after this stage)
 
 Before delegating to qa-expert, run:
@@ -262,6 +314,110 @@ Delegate to the **doc-maintainer** subagent:
   - **Update if changed:** any existing doc affected by the code changes
 - Do NOT skip doc creation for "first-time" projects — this is exactly when those essential docs should be written
 
+## Step 4.5: Deliver (only when `--deliver`/`--deploy` was passed)
+
+Runs ONLY if Flag Parsing set `DELIVER=1`. **Flag-gated, NOT stage-gated:** this step runs regardless of the starting stage — a run resumed at `test` or `docs` still delivers when the flag is present. If `DELIVER=0`, skip this entire step — nothing touches the remote — and record in the Step 5 summary: `Delivery: skipped (no --deliver flag). Deliver manually with: /autopilot-from docs --deliver`.
+
+### Step 4.5a: Compose the commit message and PR body
+
+Before running any git command, write two files under `${TMPDIR:-/tmp}` (outside the repo, so `git add -A` can never stage them):
+
+1. **Commit message** → `${TMPDIR:-/tmp}/autopilot-commit-msg.txt`. Subject is a Conventional Commit derived from the plan frontmatter: map `type:` `feature`/`design` → `feat`, `bugfix` → `fix`, `refactoring` → `refactor`, anything else → `chore`. Format: `{cc-type}: {slug with hyphens as spaces} ({PLAN-ID})`, e.g. `feat: add auth (PLAN-007)`. Body: the plan's `summary:` line. If no plan is associated with this run (e.g. a bare `docs` resume), derive the subject from the task description with type `chore`. **NO AI-attribution trailer** — do NOT use the Bash tool's HEREDOC commit example, which appends `Co-Authored-By: Claude …`; that line must not appear in any form.
+
+2. **PR body** → `${TMPDIR:-/tmp}/autopilot-pr-body.md`. Synthesize from the plan file (omit sections that have no source):
+   - **Goals** — from `## Goals & Non-Goals` (or `## Task` for lightweight plans)
+   - **Test summary** — from the qa-expert Step 3 report, or the `skipped (markdown-only)` note
+   - **Verification** — include only if a verification result exists for this run; omit the section otherwise
+   - **Rollback** — from `## Rollback Strategy`, if the plan has one
+   - **Review blockers** — only if Step 2.5 recorded `review: blockers-remaining`: list the remaining blockers verbatim
+   - No AI-attribution anywhere in the body.
+
+### Step 4.5b: Commit and guarded push
+
+Run with the commit message file path as `$1`:
+
+```bash
+# Inputs: $1 = path to the composed commit message file.
+COMMIT_MSG_FILE="$1"
+
+# Preconditions — degrade to a recorded skip, never a crash.
+command -v gh >/dev/null 2>&1 || { echo "DELIVER=skip-no-gh"; exit 0; }
+gh auth status >/dev/null 2>&1 || { echo "DELIVER=skip-no-auth"; exit 0; }
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "DELIVER=skip-not-in-repo"; exit 0; }
+git remote get-url origin >/dev/null 2>&1 || { echo "DELIVER=skip-no-remote"; exit 0; }
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+  echo "DELIVER=skip-on-default-branch"; exit 0
+fi
+
+# Stage everything the pipeline produced on this branch.
+git add -A
+# The autopilot sentinel/finished marker (and local settings, if present) are runtime
+# state, never content — keep them out of the commit in repos whose .gitignore predates them.
+git reset -q -- .claude/.autopilot-active .claude/.autopilot-finished .claude/settings.local.json 2>/dev/null || true
+
+# WHY test the index instead of inferring from commit's exit code: `git commit`
+# also fails on an unreadable message file or a failing pre-commit hook — reporting
+# those as "nothing-to-commit" would swallow a real error and leave staged work behind.
+if git diff --cached --quiet; then
+  echo "DELIVER=nothing-to-commit"
+  # Still push if the branch has unpushed commits from an earlier step (e.g. a resume),
+  # but never on a clean, fully-pushed branch.
+  ahead=$(git rev-list --count "@{upstream}..HEAD" 2>/dev/null || echo 0)
+  if [ "${ahead:-0}" -gt 0 ]; then
+    git push -u origin "$branch" || { echo "DELIVER=push-failed"; exit 1; }
+    echo "DELIVER=pushed:$branch"
+  fi
+else
+  # WHY guard the push: only push when this run actually created a commit.
+  git commit -q -F "$COMMIT_MSG_FILE" || { echo "DELIVER=commit-failed"; exit 1; }
+  git push -u origin "$branch" || { echo "DELIVER=push-failed"; exit 1; }
+  echo "DELIVER=pushed:$branch"
+fi
+```
+
+Read the `DELIVER=` output:
+- Any `skip-*` → record it verbatim in the Step 5 summary and skip the rest of Step 4.5.
+- `commit-failed` (exit 1) → surface git's error (message file unreadable, pre-commit hook failure, etc.), record `DELIVER=commit-failed` in the summary, and skip Step 4.5c. Staged work is left intact for the human. Do NOT retry.
+- `push-failed` (exit 1) → surface git's error, record `DELIVER=push-failed` in the summary, and skip Step 4.5c. Do NOT retry.
+- `pushed:*` → proceed to Step 4.5c.
+- `nothing-to-commit` with no `pushed:` line → still proceed to Step 4.5c: an earlier run may have pushed without opening the PR, and the block there handles both "no upstream" and "PR already exists".
+
+### Step 4.5c: Open the PR
+
+PR title = the commit subject from Step 4.5a. Mode: `draft` if and only if Step 2.5 recorded `review: blockers-remaining`; otherwise `ready` (a run that skipped Review is `ready`). Run with those as arguments:
+
+```bash
+# Inputs: $1 = PR title, $2 = path to the composed PR body file, $3 = "draft" or "ready".
+PR_TITLE="$1"
+PR_BODY_FILE="$2"
+PR_MODE="$3"
+
+# The branch must exist on the remote before a PR can reference it.
+git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1 || { echo "DELIVER=skip-pr-no-upstream"; exit 0; }
+
+# Reuse an existing PR rather than erroring on a resumed run.
+if gh pr view >/dev/null 2>&1; then
+  echo "DELIVER=pr-already-exists"
+  gh pr view --json url --jq .url
+  exit 0
+fi
+
+if [ "$PR_MODE" = "draft" ]; then
+  gh pr create --draft --title "$PR_TITLE" --body-file "$PR_BODY_FILE"
+else
+  gh pr create --title "$PR_TITLE" --body-file "$PR_BODY_FILE"
+fi
+echo "DELIVER=pr-created:$PR_MODE"
+```
+
+Record the final `DELIVER=` line and the PR URL (printed by `gh pr create`/`gh pr view`) for the Step 5 summary, then clean up the composed files:
+
+```bash
+rm -f "${TMPDIR:-/tmp}/autopilot-commit-msg.txt" "${TMPDIR:-/tmp}/autopilot-pr-body.md"
+```
+
 ## Step 5: Summary & Cleanup
 
 Provide a summary first, THEN remove the sentinel:
@@ -278,6 +434,11 @@ Provide a summary first, THEN remove the sentinel:
 - Files created: {list}
 - Files modified: {list}
 
+### Review (if ran)
+- Verdict: {approved | approved-after-fixes | blockers-remaining ({n} blockers)}
+- Fix/re-review iterations used: {0–2}
+- {or: `Skipped: starting stage was test/docs — nothing new to review`}
+
 ### Tests (if ran)
 - Tests written: {count}
 - Test files: {list}
@@ -288,11 +449,24 @@ Provide a summary first, THEN remove the sentinel:
 ### Documentation Updated (if ran)
 - {list of docs updated}
 
+### Delivery
+- {one of the following, depending on flags and outcome:}
+  - `Skipped (no --deliver flag). Deliver manually with: /autopilot-from docs --deliver`
+  - `{final DELIVER=... outcome}` plus the PR URL and mode (draft/ready) when a PR was opened
+
 ### Issues / Warnings
 - {anything that needs human attention}
 ```
 
-Now remove the sentinel file (must be the very last action):
+Now hand off to the Stop hook and remove the sentinel (must be the very last action):
 ```bash
+# WHY the finished marker: a single-turn autopilot run creates and removes the
+# sentinel inside one turn, so the Stop hook's sentinel bypass never fires and
+# no fingerprint is saved — the next Stop would re-trigger qa/doc agents on work
+# this run already did. This command cannot save the fingerprint itself (the
+# fingerprint file is keyed by session_id, which only the hook receives), so the
+# marker tells the hook's next fire to save it and skip. The hook consumes the
+# marker on first sight.
+touch .claude/.autopilot-finished
 rm -f .claude/.autopilot-active
 ```

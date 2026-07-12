@@ -26,6 +26,10 @@
 #   - New changes → different file list → new fingerprint → trigger.
 #   - Autopilot mode → sentinel present → save fingerprint + skip.
 #     When sentinel is removed, fingerprint still matches → skip.
+#   - Single-turn autopilot → sentinel created and removed within one
+#     turn, so the bypass above never fires. Cleanup touches a
+#     finished-marker instead; the next Stop fire saves the fingerprint,
+#     consumes the marker, and skips.
 #
 # The fingerprint is keyed by Claude Code session_id so parallel
 # sessions in different terminals don't interfere.
@@ -160,6 +164,32 @@ if [ -f "$PROJECT_DIR/.claude/.autopilot-active" ]; then
     fi
     exit 0
   fi
+fi
+
+# ── Autopilot finished-marker: save fingerprint and consume ──
+# WHY: a single-turn autopilot run creates AND removes its sentinel inside
+# one turn, and Stop only fires between turns — so the sentinel bypass above
+# never executes and no fingerprint is ever saved for that run. The command
+# cannot save it either: the fingerprint file is keyed by session_id, which
+# only this hook receives. The marker is the handoff — autopilot touches it
+# at cleanup; the first Stop fire after that saves the fingerprint here,
+# consumes the marker, and skips, instead of re-triggering agents on work
+# the autopilot run already tested and documented.
+if [ -f "$PROJECT_DIR/.claude/.autopilot-finished" ]; then
+  log "autopilot finished-marker present — saving fingerprint and consuming marker"
+  AF_DIFF=$(git diff --name-only HEAD 2>/dev/null)
+  AF_UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null)
+  AF_ALL=$( { printf '%s\n' "$AF_DIFF"; printf '%s\n' "$AF_UNTRACKED"; } | sort -u | grep -v '^[[:space:]]*$' 2>/dev/null )
+  if [ -n "$AF_ALL" ]; then
+    AF_SOURCE=$(printf '%s\n' "$AF_ALL" | grep -E "$SOURCE_EXT_PATTERN" 2>/dev/null)
+    if [ -n "$AF_SOURCE" ]; then
+      AF_FP=$(printf '%s\n' "$AF_SOURCE" | sort | compute_hash)
+      printf '%s' "$AF_FP" > "$FINGERPRINT_FILE" 2>/dev/null
+      log "Saved fingerprint from finished-marker: $AF_FP"
+    fi
+  fi
+  rm -f "$PROJECT_DIR/.claude/.autopilot-finished" 2>/dev/null
+  exit 0
 fi
 
 # ── Check for source file changes ────────────────────────────

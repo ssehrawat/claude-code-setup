@@ -2,6 +2,44 @@ Implement the following: $ARGUMENTS
 
 ---
 
+## Step 0: Non-project guard
+
+Before anything else, check whether the current working directory looks like an existing project. `/implement` presupposes a plan to implement — it must NOT bootstrap a fresh project the way `/build-plan` and `/autopilot` do.
+
+Run this detection block exactly (identical to `/build-plan` Phase 0 — three entry points must agree on what "a project" means):
+
+```bash
+# Detect "non-project" cwd.
+# Trigger conditions (ALL must be true):
+#   - no recognized manifest in cwd
+#   - no .git directory
+#   - fewer than 3 non-hidden top-level entries
+
+NEEDS_BOOTSTRAP=0
+if [ ! -f package.json ] && [ ! -f pyproject.toml ] && [ ! -f go.mod ] && [ ! -f Cargo.toml ] && [ ! -d .git ]; then
+  # Count non-hidden top-level entries (files + dirs, not dotfiles).
+  entry_count=$(ls -1 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${entry_count:-0}" -lt 3 ]; then
+    NEEDS_BOOTSTRAP=1
+  fi
+fi
+echo "NEEDS_BOOTSTRAP=$NEEDS_BOOTSTRAP"
+```
+
+**If `NEEDS_BOOTSTRAP=0`:** Proceed to Step 1 unchanged.
+
+**If `NEEDS_BOOTSTRAP=1`:** Print exactly this and STOP — do not proceed to Step 1, do not create a plan, do not invoke the engineer:
+
+```
+This directory is not a project and has no plan to implement.
+Start with:  /build-plan <what you want>   (manual planning)
+        or:  /autopilot <what you want>    (hands-free plan → build)
+```
+
+WHY refuse-and-redirect instead of bootstrapping: bootstrapping silently here would produce a repo whose first commit is engineer output with no plan and no branch policy — inconsistent with every other entry point. `/build-plan` and `/autopilot` own the bootstrap path.
+
+---
+
 ## Step 1: Check for existing plan
 
 Check if $ARGUMENTS references an existing plan ID (e.g., "PLAN-001" or "PLAN-003"):
