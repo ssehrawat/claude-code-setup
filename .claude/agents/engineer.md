@@ -186,6 +186,8 @@ function getUser() {}
    - `docs/architecture.md` — high-level overview of how components connect, data flow, entry points
    - Proper `package.json` / `pyproject.toml` / `go.mod` / `Cargo.toml` with correct scripts, dependencies, and config
    - `.gitignore` appropriate for the tech stack
+   - `.github/workflows/ci.yml` — copy the CI template matching the detected stack from `~/.claude/templates/ci/`: `package.json` → `ci.node.yml`, `pyproject.toml` → `ci.python.yml`, neither → `ci.generic.yml`. For the generic template, fill any SCAFFOLD SLOT whose command you know from the stack you just scaffolded; slots you cannot fill stay clearly marked for the human (they are scaffold output for the end user, not your implementation code).
+   - `.github/scripts/check-docs-fresh.sh` and `.github/scripts/classify-changes.sh` — vendor (copy) them from `~/.claude/templates/ci/check-docs-fresh.sh` and `~/.claude/lib/classify-changes.sh`. WHY vendored: the CI docs-freshness job runs on a runner with no `~/.claude` install; the gate resolves its classifier repo-relative to these committed siblings, so BOTH must ship together. Preserve the shell scripts byte-for-byte — they are pinned snapshots, refreshed only by re-scaffolding.
    - These files are NOT boilerplate — write them with real, accurate content specific to what you're building. The doc-maintainer will keep them updated after this.
 
 3. **Think before typing.** Consider the simplest correct approach. Consider edge cases. Consider failure modes. Consider what happens when this code runs for 6 months in production with real data. Then write.

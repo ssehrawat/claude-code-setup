@@ -5,6 +5,12 @@
 # Install location: ~/.claude/hooks/update-docs.sh
 # Referenced from:  ~/.claude/settings.json (Stop event)
 #
+# Source classification comes from the shared library
+# ~/.claude/lib/classify-changes.sh (single source of truth, PLAN-004 D17).
+# When the library is missing (install predating ~/.claude/lib), an inline
+# fallback replicates the SAME boundary — .sql included, core.quotepath=false
+# included — so both install states classify identically.
+#
 # ═══════════════════════════════════════════════════════════════
 # DEDUP STRATEGY — Fingerprint-based (stateless, single hook)
 # ═══════════════════════════════════════════════════════════════
@@ -47,7 +53,34 @@ FINGERPRINT_DIR="$HOME/.claude/hooks/.fingerprints"
 
 # WHY: Source extensions listed explicitly rather than using a broad wildcard.
 # Only files that plausibly need test/doc maintenance should trigger agents.
-SOURCE_EXT_PATTERN='\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|rb|cpp|c|h|hpp|cs|swift|kt|scala|ex|exs|clj|zig|sh|lua|php|dart)$'
+# This inline pattern is the FAIL-OPEN FALLBACK for installs predating
+# ~/.claude/lib. It includes .sql to match the shared library (D19): the
+# fallback exists for safety during the un-reinstalled window, not to preserve
+# the pre-D19 boundary — without .sql here, a .sql-only diff would be "not
+# source" to this hook but "source" to the qa/autopilot guards on the same
+# machine, which is exactly the cross-consumer drift D17 eliminates.
+SOURCE_EXT_PATTERN='\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|rb|cpp|c|h|hpp|cs|swift|kt|scala|ex|exs|clj|zig|sh|lua|php|dart|sql)$'
+
+# ── Shared change classifier (single source of truth, PLAN-004 D17) ──
+# WHY guarded: a Stop hook must never block Claude's stop over its own config.
+# If the library is missing (install.sh not re-run yet), fall back to local
+# definitions that replicate the shared library's behavior — same allowlist
+# (.sql included) and same quotepath handling — so both install states agree.
+if [ -f "$HOME/.claude/lib/classify-changes.sh" ]; then
+  . "$HOME/.claude/lib/classify-changes.sh"
+else
+  collect_changed_files() {
+    # WHY core.quotepath=false: matches the shared library — git C-quotes
+    # non-ASCII paths by default, and the trailing quote defeats the
+    # $-anchored extension match.
+    { git -c core.quotepath=false diff --name-only HEAD 2>/dev/null
+      git -c core.quotepath=false ls-files --others --exclude-standard 2>/dev/null
+    } | sort -u | grep -v '^[[:space:]]*$'
+  }
+  source_files_from_stdin() {
+    grep -E "$SOURCE_EXT_PATTERN"
+  }
+fi
 
 # WHY: 2 hours is generous enough to cover any realistic autopilot run,
 # but short enough that a crashed sentinel doesn't block the hook forever.
@@ -112,16 +145,11 @@ if [ -n "$STOP_ACTIVE" ]; then
     PROJECT_DIR="$(pwd)"
   fi
   cd "$PROJECT_DIR" 2>/dev/null
-  SA_DIFF=$(git diff --name-only HEAD 2>/dev/null)
-  SA_UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null)
-  SA_ALL=$( { printf '%s\n' "$SA_DIFF"; printf '%s\n' "$SA_UNTRACKED"; } | sort -u | grep -v '^[[:space:]]*$' 2>/dev/null )
-  if [ -n "$SA_ALL" ]; then
-    SA_SOURCE=$(printf '%s\n' "$SA_ALL" | grep -E "$SOURCE_EXT_PATTERN" 2>/dev/null)
-    if [ -n "$SA_SOURCE" ]; then
-      SA_FP=$(printf '%s\n' "$SA_SOURCE" | sort | compute_hash)
-      printf '%s' "$SA_FP" > "$FINGERPRINT_FILE" 2>/dev/null
-      log "Updated fingerprint after agent run: $SA_FP"
-    fi
+  SA_SOURCE=$(collect_changed_files | source_files_from_stdin)
+  if [ -n "$SA_SOURCE" ]; then
+    SA_FP=$(printf '%s\n' "$SA_SOURCE" | sort | compute_hash)
+    printf '%s' "$SA_FP" > "$FINGERPRINT_FILE" 2>/dev/null
+    log "Updated fingerprint after agent run: $SA_FP"
   fi
   exit 0
 fi
@@ -151,16 +179,11 @@ if [ -f "$PROJECT_DIR/.claude/.autopilot-active" ]; then
     # WHY: Save the fingerprint now so that when autopilot finishes and
     # removes the sentinel, the next Stop fire sees "already processed"
     # and skips. Without this, post-autopilot would double-trigger agents.
-    AP_DIFF=$(git diff --name-only HEAD 2>/dev/null)
-    AP_UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null)
-    AP_ALL=$( { printf '%s\n' "$AP_DIFF"; printf '%s\n' "$AP_UNTRACKED"; } | sort -u | grep -v '^[[:space:]]*$' 2>/dev/null )
-    if [ -n "$AP_ALL" ]; then
-      AP_SOURCE=$(printf '%s\n' "$AP_ALL" | grep -E "$SOURCE_EXT_PATTERN" 2>/dev/null)
-      if [ -n "$AP_SOURCE" ]; then
-        AP_FP=$(printf '%s\n' "$AP_SOURCE" | sort | compute_hash)
-        printf '%s' "$AP_FP" > "$FINGERPRINT_FILE" 2>/dev/null
-        log "Saved fingerprint during autopilot bypass"
-      fi
+    AP_SOURCE=$(collect_changed_files | source_files_from_stdin)
+    if [ -n "$AP_SOURCE" ]; then
+      AP_FP=$(printf '%s\n' "$AP_SOURCE" | sort | compute_hash)
+      printf '%s' "$AP_FP" > "$FINGERPRINT_FILE" 2>/dev/null
+      log "Saved fingerprint during autopilot bypass"
     fi
     exit 0
   fi
@@ -177,38 +200,23 @@ fi
 # the autopilot run already tested and documented.
 if [ -f "$PROJECT_DIR/.claude/.autopilot-finished" ]; then
   log "autopilot finished-marker present — saving fingerprint and consuming marker"
-  AF_DIFF=$(git diff --name-only HEAD 2>/dev/null)
-  AF_UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null)
-  AF_ALL=$( { printf '%s\n' "$AF_DIFF"; printf '%s\n' "$AF_UNTRACKED"; } | sort -u | grep -v '^[[:space:]]*$' 2>/dev/null )
-  if [ -n "$AF_ALL" ]; then
-    AF_SOURCE=$(printf '%s\n' "$AF_ALL" | grep -E "$SOURCE_EXT_PATTERN" 2>/dev/null)
-    if [ -n "$AF_SOURCE" ]; then
-      AF_FP=$(printf '%s\n' "$AF_SOURCE" | sort | compute_hash)
-      printf '%s' "$AF_FP" > "$FINGERPRINT_FILE" 2>/dev/null
-      log "Saved fingerprint from finished-marker: $AF_FP"
-    fi
+  AF_SOURCE=$(collect_changed_files | source_files_from_stdin)
+  if [ -n "$AF_SOURCE" ]; then
+    AF_FP=$(printf '%s\n' "$AF_SOURCE" | sort | compute_hash)
+    printf '%s' "$AF_FP" > "$FINGERPRINT_FILE" 2>/dev/null
+    log "Saved fingerprint from finished-marker: $AF_FP"
   fi
   rm -f "$PROJECT_DIR/.claude/.autopilot-finished" 2>/dev/null
   exit 0
 fi
 
 # ── Check for source file changes ────────────────────────────
-DIFF_HEAD=$(git diff --name-only HEAD 2>/dev/null)
-UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null)
-
-log "Strategy: diff vs HEAD=$(count_lines "$DIFF_HEAD") files, untracked=$(count_lines "$UNTRACKED") files"
-
-ALL_CHANGED=$(
-  {
-    printf '%s\n' "$DIFF_HEAD"
-    printf '%s\n' "$UNTRACKED"
-  } | sort -u | grep -v '^[[:space:]]*$' 2>/dev/null
-)
-log "Combined unique: $(count_lines "$ALL_CHANGED") files"
+ALL_CHANGED=$(collect_changed_files)
+log "Changed (diff vs HEAD + untracked, unique): $(count_lines "$ALL_CHANGED") files"
 
 SOURCE_FILES=""
 if [ -n "$ALL_CHANGED" ]; then
-  SOURCE_FILES=$(printf '%s\n' "$ALL_CHANGED" | grep -E "$SOURCE_EXT_PATTERN" 2>/dev/null)
+  SOURCE_FILES=$(printf '%s\n' "$ALL_CHANGED" | source_files_from_stdin)
 fi
 
 SOURCE_COUNT=$(count_lines "$SOURCE_FILES")

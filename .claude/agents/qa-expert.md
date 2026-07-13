@@ -15,11 +15,20 @@ Before doing anything else, check whether every changed file in this session is 
 Run this exact POSIX block first:
 
 ```bash
-non_md=$(git diff --name-only HEAD; git ls-files --others --exclude-standard)
-if printf '%s\n' "$non_md" | grep -v '\.md$' | grep -q .; then
-  echo "MD_ONLY=0"
+# "Markdown-only" = the change set contains no source files, judged by the
+# shared classifier's allowlist (single source of truth — PLAN-004 D17/D18).
+if [ -f "$HOME/.claude/lib/classify-changes.sh" ]; then
+  . "$HOME/.claude/lib/classify-changes.sh"
+  is_markdown_only || :  # MD_ONLY=0 returns 1 by design; not a command failure
 else
-  echo "MD_ONLY=1"
+  # Transitional fallback for installs predating ~/.claude/lib: the historical
+  # inline blocklist check. Re-run install.sh to pick up the shared library.
+  non_md=$(git diff --name-only HEAD; git ls-files --others --exclude-standard)
+  if printf '%s\n' "$non_md" | grep -v '\.md$' | grep -q .; then
+    echo "MD_ONLY=0"
+  else
+    echo "MD_ONLY=1"
+  fi
 fi
 ```
 
