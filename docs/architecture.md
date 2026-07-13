@@ -17,8 +17,9 @@ User-facing entry points registered as Claude Code slash commands.
 | `/build-plan` | `commands/build-plan.md` | Interactive Q&A with planner agent |
 | `/review-plan` | `commands/review-plan.md` | Review/approve a plan (never implements) |
 | `/review` | `commands/review.md` | One-shot adversarial code review of the working tree (report only) |
+| `/verify` | `commands/verify.md` | Real-run check of the built artifact (blocking in manual mode) |
 | `/implement` | `commands/implement.md` | Smart implement with complexity detection |
-| `/autopilot` | `commands/autopilot.md` | Full pipeline: plan, implement, review, test, docs (+ opt-in delivery) |
+| `/autopilot` | `commands/autopilot.md` | Full pipeline: plan, implement, review, test, verify, security, docs (+ opt-in delivery and CI heal) |
 | `/autopilot-from` | `commands/autopilot-from.md` | Resume pipeline from any stage |
 
 ### Subagents (`agents/`)
@@ -37,7 +38,41 @@ The reviewer is deliberately NOT wired into the Stop hook: the hook runs its age
 
 ### Stop Hook (`hooks/update-docs.sh`)
 
-The single hook registered in `settings.json` under the `Stop` event. Fires every time Claude Code finishes a response. Detects source file changes via git and triggers qa-expert + doc-maintainer.
+The single hook registered in `settings.json` under the `Stop` event. Fires every time Claude Code finishes a response. Detects source file changes via git and triggers qa-expert + doc-maintainer. Source detection comes from the shared classification library (below); when the library is missing (an install predating `~/.claude/lib/`), the hook falls back to an inline replica of the library's boundary (`.sql` and `core.quotepath=false` included) — fail-open, matching its posture everywhere else, and never diverging from what the other consumers on the same machine would decide.
+
+### Shared Change Classification Library (`lib/classify-changes.sh`)
+
+The single source of truth for "is this changed file source code?". POSIX `sh`, installed to `~/.claude/lib/`, and consumed by four surfaces: the Stop hook, the autopilot Step 3 markdown-only guard, the qa-expert scope guard, and the CI docs-freshness gate. It exposes:
+
+- `SOURCE_EXT_PATTERN` — the curated extension allowlist (code extensions plus `.sql`; `.yaml`/`Dockerfile`/lockfiles deliberately excluded)
+- `collect_changed_files` — `git diff --name-only HEAD` + untracked, deduplicated; runs git with `core.quotepath=false` so non-ASCII filenames aren't C-quoted out of the `$`-anchored extension match
+- `source_files_from_stdin` — stdin-only filter (never sniffs its input mode, so it can never hang on `cat`)
+- `is_source_change` — collect piped into filter
+- `is_markdown_only` — emits `MD_ONLY=1|0`; defined as the inverse of `is_source_change`, NOT `grep -v '\.md$'`
+
+WHY it exists: the repo previously had two contradictory framings (the hook's allowlist vs. autopilot/qa-expert's `.md` blocklist) that silently disagreed on `.sql`/`.yaml` diffs. One file makes drift impossible by construction. Every consumer checks for the file before sourcing and degrades when absent: the Stop hook to an inline replica of the library's allowlist (`.sql` included — the fallback covers the un-reinstalled window, it does not preserve the pre-unification boundary), the autopilot and qa-expert guards to their transitional `.md`-blocklist check.
+
+The library is also **vendored** into generated projects (`.github/scripts/classify-changes.sh`) so the CI gate works on runners with no `~/.claude` — that copy is a deliberate pinned snapshot, refreshed by re-scaffolding, and does not count against the in-repo single-source guarantee.
+
+### Verify Gate (autopilot Step 3.5, `/verify`)
+
+Real-run verification, distinct from unit tests: detects the run surface (HTTP server → start + curl a health endpoint, assert 2xx; CLI → `--help`, assert exit 0; library → run the README example) with a bounded timeout and trap-guaranteed process teardown. Advisory in autopilot (`verify: pass|fail|not-applicable` recorded; a `fail` downgrades a delivered PR to draft); blocking in the manual `/verify` command.
+
+### Security Gate (autopilot Step 3.6)
+
+Ordered checks before docs/delivery: (a) secret scan of the diff's added lines + untracked files against known credential shapes — **always blocking**; a hit records `security: BLOCKED-secret` and unconditionally skips Deliver and CI Heal; (b) dependency audit (`npm audit --omit=dev` / `pip-audit` when present) — advisory unless `--strict-security` upgrades findings to delivery-blocking; (c) the security-review skill — advisory. On a `docs` resume with `--deliver`, the secret scan re-runs as a Deliver precondition since Step 3.6 was skipped positionally.
+
+### CI Templates & Stale-Docs Gate (`templates/ci/`)
+
+Three GitHub Actions templates (`ci.generic.yml`, `ci.node.yml`, `ci.python.yml`) installed to `~/.claude/templates/ci/`. The engineer scaffold drops the stack-matched one into a new project as `.github/workflows/ci.yml` and vendors `check-docs-fresh.sh` + `classify-changes.sh` into `.github/scripts/`.
+
+Each template has a `docs-freshness` job (checkout with `fetch-depth: 0` for the merge base) that runs `check-docs-fresh.sh`: FAIL when source files changed but no doc surface (`README.md`, `CLAUDE.md`, `docs/**`, `.env.example`) changed alongside. Escape hatch: a `[skip-docs]` token (case-insensitive) in any commit message in the PR range. The gate resolves its classifier repo-relative to its own location (`CLASSIFY_LIB` env override honored; `$HOME/.claude/lib` local-dev fallback) and exits 2 only when even the vendored sibling is missing — a CI gate must never silently pass on misconfiguration.
+
+When `git merge-base` fails (shallow clone or unfetched base ref — possible only in hand-edited workflows, since the templates set `fetch-depth: 0`), the gate **passes with a warning** that names the fix. Without a merge base the PR's own change set is not computable: a direct two-endpoint diff would attribute the base branch's commits to the PR and could fail a PR that changed no source at all. A gate that cannot evaluate must never block wrongly.
+
+### CI Heal (autopilot Step 4.6)
+
+Runs only after Deliver actually pushed; flag-gated like Deliver, not stage-gated. Polls the branch's latest CI run via `gh` (bounded number of checks — never an infinite wait); on red, pulls `gh run view --log-failed`, dispatches the engineer with the log as the fix brief, commits, **re-runs the always-blocking secret scan on the heal diff** (a hit undoes the commit and aborts with `CI-HEAL=ABORTED-secret-detected` — never pushed), then pushes. Hard cap: 3 attempts, then `CI=red-after-3-attempts`. `gh`/network failure records `CI=unavailable` and stops. A heal attempt can also end the loop on its own: `CI-HEAL=nothing-to-commit` (the engineer produced no change — re-dispatching on the same log would loop) and `CI-HEAL=commit-failed`/`push-failed` (git's error surfaced, never retried). Every terminal outcome — `green`, `red-after-3-attempts`, `unavailable`, a `CI-HEAL=…` stop, or `skipped (nothing pushed)` — feeds the Step 5 summary. Reviewer and verify are intentionally not re-run inside the loop (cost + loop-safety); the secret scan is, because its guarantee is unconditional.
 
 ### Installer (`install.sh`)
 
@@ -77,7 +112,7 @@ Between implement and test, the reviewer subagent critiques the working-tree dif
 
 Runs only when `--deliver` (or `--deploy`, which implies it) was passed — the flags are parsed and stripped from `$ARGUMENTS` before Step 0 so they never pollute project-name derivation. Without a flag, no autopilot run touches a remote; the upfront flag is the confirmation, which preserves the "never ask" contract without a mid-run prompt.
 
-The stage composes a Conventional Commit message and PR body from the plan (Goals, Test summary, Rollback — no AI-attribution trailer anywhere), then runs a gh-guarded shell block: preconditions (`gh` present + authenticated, in a repo, `origin` exists, not on `main`/`master`) degrade to recorded skips; the push is guarded (only after a real commit, or when the branch is ahead of upstream); a failing commit or push is a distinct terminal outcome (`commit-failed`/`push-failed` — the block tests the index with `git diff --cached --quiet` rather than inferring from commit's exit code, so a hook or message-file failure is never misreported as `nothing-to-commit`) that leaves staged work intact and skips the PR; the PR opens as a draft iff the review recorded `blockers-remaining`. In `/autopilot-from`, delivery is flag-gated, not stage-gated — a `test`/`docs` resume still delivers with the flag. Merging is always human (`--deploy`'s deploy stage is a later phase, currently a no-op beyond implying `--deliver`).
+The stage composes a Conventional Commit message and PR body from the plan (Goals, Test summary, Rollback — no AI-attribution trailer anywhere), then runs a gh-guarded shell block: preconditions (`gh` present + authenticated, in a repo, `origin` exists, not on `main`/`master`) degrade to recorded skips; the push is guarded (only after a real commit, or when the branch is ahead of upstream); a failing commit or push is a distinct terminal outcome (`commit-failed`/`push-failed` — the block tests the index with `git diff --cached --quiet` rather than inferring from commit's exit code, so a hook or message-file failure is never misreported as `nothing-to-commit`) that leaves staged work intact and skips the PR; the PR opens as a draft iff the review recorded `blockers-remaining` or Step 3.5 recorded `verify: fail`. In `/autopilot-from`, delivery is flag-gated, not stage-gated — a `test`/`docs` resume still delivers with the flag. Merging is always human (`--deploy`'s deploy stage is a later phase, currently a no-op beyond implying `--deliver`).
 
 ## Data Flow
 
@@ -123,9 +158,16 @@ User runs /autopilot <description> [--deliver|--deploy]
   -> Step 2.5: reviewer critiques the diff; blockers -> engineer fix pass + re-review
        (capped at 2 iterations; surviving blockers recorded, run continues)
   -> qa-expert runs tests
+  -> Step 3.5: real-run verify (advisory; fail downgrades a delivered PR to draft)
+  -> Step 3.6: security — secret scan (ALWAYS blocking) + dependency audit
+       (advisory unless --strict-security) + security-review skill (advisory)
   -> doc-maintainer updates docs
-  -> Step 4.5 (ONLY with --deliver/--deploy): commit -> guarded push -> gh PR
-       (draft iff blockers remained; without the flag, nothing touches the remote)
+  -> Step 4.5 (ONLY with --deliver/--deploy, and never after BLOCKED-secret):
+       commit -> guarded push -> gh PR
+       (draft iff blockers remained or verify failed; without the flag,
+        nothing touches the remote)
+  -> Step 4.6 (only if 4.5 pushed): poll CI -> on red, engineer fixes from the
+       failing log -> secret re-scan -> push (capped at 3 attempts)
   -> touches .claude/.autopilot-finished marker, removes sentinel
   -> Claude stops
   -> Stop hook fires, sees the finished-marker, saves the fingerprint,
@@ -137,8 +179,8 @@ User runs /autopilot <description> [--deliver|--deploy]
 
 The Stop hook can fire multiple times per turn (once per subagent return, once per follow-up). To prevent redundant agent runs:
 
-1. Collect all uncommitted + untracked source files via `git diff --name-only HEAD` and `git ls-files --others`
-2. Filter to source extensions (`.ts`, `.py`, `.rs`, `.go`, etc.)
+1. Collect all uncommitted + untracked source files via `git diff --name-only HEAD` and `git ls-files --others` (`collect_changed_files` from the shared library)
+2. Filter to source extensions (`.ts`, `.py`, `.rs`, `.go`, `.sql`, etc.) via the shared `SOURCE_EXT_PATTERN` (`source_files_from_stdin`; inline fallback when `~/.claude/lib/` is absent)
 3. Sort the file list and hash it (`md5sum`, `md5`, or `cksum` as fallback)
 4. **Session baseline**: the first Stop of a session snapshots this hash to `~/.claude/hooks/.fingerprints/{session_id}.baseline` and exits — so a dirty tree that predates the session never triggers agents. Subsequent Stops that still match the baseline also exit: agents fire only on deltas made during the session.
 5. Compare against `~/.claude/hooks/.fingerprints/{session_id}.fingerprint`
@@ -162,6 +204,7 @@ Four layers prevent infinite loops and redundant agent runs:
     build-plan.md            -- /build-plan slash command
     review-plan.md           -- /review-plan slash command
     review.md                -- /review slash command
+    verify.md                -- /verify slash command
     implement.md             -- /implement slash command
     autopilot.md             -- /autopilot slash command
     autopilot-from.md        -- /autopilot-from slash command
@@ -173,6 +216,14 @@ Four layers prevent infinite loops and redundant agent runs:
     doc-maintainer.md        -- documentation expert persona
   hooks/
     update-docs.sh           -- Stop hook script
+  lib/
+    classify-changes.sh      -- shared source-change classifier
+  templates/
+    ci/
+      ci.generic.yml         -- CI scaffold template (no detected stack)
+      ci.node.yml            -- CI scaffold template (Node)
+      ci.python.yml          -- CI scaffold template (Python)
+      check-docs-fresh.sh    -- stale-docs CI gate (vendored into scaffolds)
 install.sh                   -- installer
 README.md                    -- user-facing documentation
 docs/

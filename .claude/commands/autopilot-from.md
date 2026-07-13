@@ -11,6 +11,7 @@ AUTOMODE — Resume the autopilot pipeline from a specific stage for: $ARGUMENTS
 RAW_ARGS="$1"
 DELIVER=0
 DEPLOY=0
+STRICT_SECURITY=0
 TASK=""
 # WHY set -f: the unquoted $RAW_ARGS word-split is intentional, but without
 # noglob a task containing * or ? would expand to cwd filenames and corrupt
@@ -18,29 +19,31 @@ TASK=""
 set -f
 for word in $RAW_ARGS; do
   case "$word" in
-    --deliver) DELIVER=1 ;;
-    --deploy)  DEPLOY=1; DELIVER=1 ;;  # --deploy implies --deliver
-    *)         TASK="$TASK $word" ;;
+    --deliver)         DELIVER=1 ;;
+    --deploy)          DEPLOY=1; DELIVER=1 ;;  # --deploy implies --deliver
+    --strict-security) STRICT_SECURITY=1 ;;
+    *)                 TASK="$TASK $word" ;;
   esac
 done
 set +f
 TASK=${TASK# }
 echo "DELIVER=$DELIVER"
 echo "DEPLOY=$DEPLOY"
+echo "STRICT_SECURITY=$STRICT_SECURITY"
 echo "TASK=$TASK"
 ```
 
-`DELIVER=1` activates Step 4.5. `DEPLOY=1` currently only implies `--deliver`; the deploy stage itself is Phase 3 of the outer-loop plan and is a no-op today. Without a flag, this pipeline never touches a remote — the upfront flag IS the confirmation, so the run stays hands-free either way.
+`DELIVER=1` activates Step 4.5 (and Step 4.6 when something is pushed). `STRICT_SECURITY=1` upgrades Step 3.6 dependency advisories from advisory to delivery-blocking. `DEPLOY=1` currently only implies `--deliver`; the deploy stage itself is Phase 3 of the outer-loop plan and is a no-op today. Without a flag, this pipeline never touches a remote — the upfront flag IS the confirmation, so the run stays hands-free either way.
 
 Parse the FIRST word of `TASK` (the flag-stripped remainder) to determine the starting stage. The rest is the task description or plan reference.
 
 **Stage keywords** (case-insensitive):
-- `plan` → Start from Step 1 (Plan → Implement → Review → Test → Docs)
-- `implement` → Start from Step 2 (Implement → Review → Test → Docs). Requires a plan ID like PLAN-001.
-- `test` → Start from Step 3 (Test → Docs). Assumes code is already written and reviewed.
-- `docs` → Start from Step 4 (Docs only). Assumes code and tests are done.
+- `plan` → Start from Step 1 (Plan → Implement → Review → Test → Verify → Security → Docs)
+- `implement` → Start from Step 2 (Implement → Review → Test → Verify → Security → Docs). Requires a plan ID like PLAN-001.
+- `test` → Start from Step 3 (Test → Verify → Security → Docs). Assumes code is already written and reviewed.
+- `docs` → Start from Step 4 (Docs only). Assumes code and tests are done. When `--deliver`/`--deploy` was passed, the Step 3.6a secret scan still runs before Step 4.5 (see the Deliver precondition) — the always-blocking guarantee is unconditional.
 
-**Stage-skipping vs. flag-gating:** only Review (Step 2.5) is stage-skipped — a `test` or `docs` start has nothing new to review. Deliver (Step 4.5) is flag-gated, NOT stage-gated: a run resumed at `test` or `docs` still delivers when `--deliver`/`--deploy` was passed, because a resumed run must be able to ship.
+**Stage-skipping vs. flag-gating:** only Review (Step 2.5) is stage-skipped — a `test` or `docs` start has nothing new to review. Deliver (Step 4.5) and CI Heal (Step 4.6) are flag-gated, NOT stage-gated: a run resumed at `test` or `docs` still delivers and heals CI when `--deliver`/`--deploy` was passed, because a resumed run must be able to ship.
 
 **Examples:**
 - `/autopilot-from plan add user authentication` → full pipeline
@@ -285,11 +288,20 @@ WHY the loop lives in this command and not in the reviewer agent: agents are sta
 Before delegating to qa-expert, run:
 
 ```bash
-non_md=$(git diff --name-only HEAD; git ls-files --others --exclude-standard)
-if printf '%s\n' "$non_md" | grep -v '\.md$' | grep -q .; then
-  echo "MD_ONLY=0"
+# "Markdown-only" = the change set contains no source files, judged by the
+# shared classifier's allowlist (single source of truth — PLAN-004 D17/D18).
+if [ -f "$HOME/.claude/lib/classify-changes.sh" ]; then
+  . "$HOME/.claude/lib/classify-changes.sh"
+  is_markdown_only || :  # MD_ONLY=0 returns 1 by design; not a command failure
 else
-  echo "MD_ONLY=1"
+  # Transitional fallback for installs predating ~/.claude/lib: the historical
+  # inline blocklist check. Re-run install.sh to pick up the shared library.
+  non_md=$(git diff --name-only HEAD; git ls-files --others --exclude-standard)
+  if printf '%s\n' "$non_md" | grep -v '\.md$' | grep -q .; then
+    echo "MD_ONLY=0"
+  else
+    echo "MD_ONLY=1"
+  fi
 fi
 ```
 
@@ -303,6 +315,158 @@ Delegate to the **qa-expert** subagent:
 - Run the test suite to verify everything passes
 - If tests fail, fix the code or tests until green
 - Check eval coverage if `evals/` exists
+
+## Step 3.5: Verify (real-run, advisory)
+
+Distinct from Step 3's unit tests: this step starts the actual artifact once and confirms it behaves. It is ADVISORY in autopilot — record `verify: pass|fail|not-applicable` for the Step 5 summary and ALWAYS continue to Step 3.6, whatever the outcome. Environment variance (ports, env vars, external services) makes hard-blocking too brittle for a hands-free run; the blocking variant is the manual `/verify` command. A `fail` outcome downgrades a `--deliver` PR to a draft in Step 4.5c.
+
+Detect the run surface from the manifest, the plan, and the README — first match wins:
+
+1. **HTTP server** — a start script or entry point that serves HTTP (e.g. `npm start` on an Express app, `uvicorn`/`flask run`). Use the server block below with the start command and a health or root URL.
+2. **CLI** — the project ships a command-line entry point. Use the CLI block below with `--help` (or a documented subcommand); exit 0 = pass.
+3. **Library** — no run surface of its own. Write the README usage example to a scratch file under `${TMPDIR:-/tmp}`, run it via the CLI block, then delete the scratch file.
+4. **Nothing detectable** — record `verify: not-applicable` and continue. Do not invent a probe.
+
+HTTP-server surface:
+
+```bash
+# Inputs: $1 = start command (e.g. "npm start"),
+#         $2 = URL to probe (e.g. "http://127.0.0.1:3000/health").
+START_CMD="$1"
+PROBE_URL="$2"
+VERIFY_TIMEOUT=30
+
+command -v curl >/dev/null 2>&1 || { echo "VERIFY=not-applicable (no curl)"; exit 0; }
+
+SERVER_PID=""
+cleanup() { [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null; }
+# WHY trap EXIT too: the started process must die in ALL paths — success,
+# probe failure, or an unexpected error mid-block. Never leak a server.
+trap cleanup EXIT INT TERM
+
+sh -c "$START_CMD" >/dev/null 2>&1 &
+SERVER_PID=$!
+
+elapsed=0
+while [ "$elapsed" -lt "$VERIFY_TIMEOUT" ]; do
+  http_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$PROBE_URL" 2>/dev/null)
+  case "$http_code" in
+    2??) echo "VERIFY=pass"; exit 0 ;;
+  esac
+  # The server died before answering — no point waiting out the clock.
+  kill -0 "$SERVER_PID" 2>/dev/null || { SERVER_PID=""; break; }
+  sleep 2
+  elapsed=$((elapsed + 2))
+done
+echo "VERIFY=fail"
+exit 0
+```
+
+CLI / library surface:
+
+```bash
+# Inputs: $1 = the invocation to probe (e.g. "node dist/cli.js --help",
+#         "python -m mytool --help", "sh /tmp/readme-example.sh").
+CLI_CMD="$1"
+VERIFY_TIMEOUT=30
+
+sh -c "$CLI_CMD" >/dev/null 2>&1 &
+CLI_PID=$!
+# WHY trap: if this block is interrupted mid-wait, the probe must not outlive it.
+trap 'kill "$CLI_PID" 2>/dev/null' EXIT INT TERM
+
+# WHY a poll loop instead of `timeout`: coreutils timeout does not exist on
+# stock macOS; kill -0 polling is POSIX-portable across Git Bash/macOS/Linux.
+elapsed=0
+while kill -0 "$CLI_PID" 2>/dev/null && [ "$elapsed" -lt "$VERIFY_TIMEOUT" ]; do
+  sleep 1
+  elapsed=$((elapsed + 1))
+done
+
+if kill -0 "$CLI_PID" 2>/dev/null; then
+  # Still running after the budget — a CLI probe should exit quickly.
+  kill "$CLI_PID" 2>/dev/null
+  echo "VERIFY=fail (timeout after ${VERIFY_TIMEOUT}s)"
+  exit 0
+fi
+
+if wait "$CLI_PID"; then
+  echo "VERIFY=pass"
+else
+  echo "VERIFY=fail (exit $?)"
+fi
+exit 0
+```
+
+Record the `VERIFY=` line for Step 5 and the Step 4.5c draft decision, then continue.
+
+## Step 3.6: Security
+
+Three checks, strictly in this order. Only the secret scan can block. Record a single outcome for Step 5: `security: pass|advisories|BLOCKED-secret`.
+
+### Step 3.6a: Secret scan (ALWAYS BLOCKING)
+
+```bash
+# Scans everything this run could deliver — the tracked diff's added lines plus
+# untracked files — for known credential shapes. WHY always blocking even though
+# the rest of this step is advisory: a pushed secret is unrecoverable (it must
+# be rotated); the asymmetry of harm justifies the one unconditional hard block
+# in a hands-free pipeline.
+SECRET_PATTERN='AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|AIza[0-9A-Za-z_-]{35}|ya29\.[0-9A-Za-z_-]+'
+
+tracked_hits=$(git diff HEAD 2>/dev/null | grep -E '^\+' | grep -E -c "$SECRET_PATTERN")
+# WHY core.quotepath=false: git C-quotes non-ASCII filenames by default, and
+# the quoted form fails [ -f ] — a secret in such a file would be silently missed.
+untracked_hits=$(git -c core.quotepath=false ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r path; do
+  [ -f "$path" ] && grep -E -q "$SECRET_PATTERN" "$path" 2>/dev/null && printf '%s\n' "$path"
+done)
+
+if [ "${tracked_hits:-0}" -gt 0 ] || [ -n "$untracked_hits" ]; then
+  echo "SECURITY=BLOCKED-secret"
+  [ "${tracked_hits:-0}" -gt 0 ] && echo "  $tracked_hits added line(s) in the tracked diff match a credential pattern"
+  if [ -n "$untracked_hits" ]; then
+    echo "  untracked files with matches:"
+    printf '%s\n' "$untracked_hits" | sed 's/^/    /'
+  fi
+else
+  echo "SECRET_SCAN=clean"
+fi
+```
+
+On `SECURITY=BLOCKED-secret`: surface it LOUDLY (name the matching locations), record `security: BLOCKED-secret`, and mark delivery blocked — Steps 4.5 and 4.6 MUST be skipped even when `--deliver`/`--deploy` was passed. The pipeline still continues to Step 4 and terminates normally; nothing is committed or pushed until a human removes the credential.
+
+### Step 3.6b: Dependency audit (advisory unless `--strict-security`)
+
+```bash
+# Advisory by default: CVE feeds are noisy and the fix is often a transitive
+# bump the author cannot make. --strict-security upgrades findings to
+# delivery-blocking for callers who want the hard gate.
+if [ -f package.json ] && command -v npm >/dev/null 2>&1; then
+  if audit_out=$(npm audit --omit=dev 2>&1); then
+    echo "DEPS=clean"
+  else
+    echo "DEPS=advisories"
+    printf '%s\n' "$audit_out" | tail -5
+  fi
+elif { [ -f pyproject.toml ] || [ -f requirements.txt ]; } && command -v pip-audit >/dev/null 2>&1; then
+  if audit_out=$(pip-audit 2>&1); then
+    echo "DEPS=clean"
+  else
+    echo "DEPS=advisories"
+    printf '%s\n' "$audit_out" | tail -5
+  fi
+else
+  echo "DEPS=skipped"
+fi
+```
+
+`DEPS=advisories` is recorded and appended to the PR body (Step 4.5a), never blocking — UNLESS Flag Parsing set `STRICT_SECURITY=1`, in which case treat it like a blocked delivery: record `security: advisories (blocking via --strict-security)` and skip Steps 4.5/4.6.
+
+### Step 3.6c: Security review skill (advisory)
+
+If the built-in security-review skill is available in this session, run it over the diff for logic-level vulnerabilities (injection, authz gaps, unsafe eval). Its findings are advisory: record them for the Step 5 summary and the PR body. Never block on them.
+
+Outcome for Step 5: `BLOCKED-secret` if 3.6a hit; else `advisories` if 3.6b or 3.6c found anything; else `pass`.
 
 ## Step 4: Document
 
@@ -318,6 +482,10 @@ Delegate to the **doc-maintainer** subagent:
 
 Runs ONLY if Flag Parsing set `DELIVER=1`. **Flag-gated, NOT stage-gated:** this step runs regardless of the starting stage — a run resumed at `test` or `docs` still delivers when the flag is present. If `DELIVER=0`, skip this entire step — nothing touches the remote — and record in the Step 5 summary: `Delivery: skipped (no --deliver flag). Deliver manually with: /autopilot-from docs --deliver`.
 
+**Precondition — the always-blocking secret scan:** if Step 3.6 did not run this session (a `docs` start skips it positionally), run the Step 3.6a block NOW, before composing anything. `SECURITY=BLOCKED-secret` blocks delivery here exactly as it does there.
+
+Also skip this step (and Step 4.6) when Step 3.6 recorded `security: BLOCKED-secret` — a detected credential blocks delivery unconditionally, flag or no flag — or when `--strict-security` upgraded dependency advisories to blocking. Record the blocking outcome in the Step 5 summary.
+
 ### Step 4.5a: Compose the commit message and PR body
 
 Before running any git command, write two files under `${TMPDIR:-/tmp}` (outside the repo, so `git add -A` can never stage them):
@@ -327,7 +495,8 @@ Before running any git command, write two files under `${TMPDIR:-/tmp}` (outside
 2. **PR body** → `${TMPDIR:-/tmp}/autopilot-pr-body.md`. Synthesize from the plan file (omit sections that have no source):
    - **Goals** — from `## Goals & Non-Goals` (or `## Task` for lightweight plans)
    - **Test summary** — from the qa-expert Step 3 report, or the `skipped (markdown-only)` note
-   - **Verification** — include only if a verification result exists for this run; omit the section otherwise
+   - **Verification** — the Step 3.5 `verify:` outcome; omit the section if it recorded `not-applicable` or Step 3.5 did not run
+   - **Security** — dependency advisories and security-review findings from Step 3.6, if any; omit when clean
    - **Rollback** — from `## Rollback Strategy`, if the plan has one
    - **Review blockers** — only if Step 2.5 recorded `review: blockers-remaining`: list the remaining blockers verbatim
    - No AI-attribution anywhere in the body.
@@ -386,7 +555,7 @@ Read the `DELIVER=` output:
 
 ### Step 4.5c: Open the PR
 
-PR title = the commit subject from Step 4.5a. Mode: `draft` if and only if Step 2.5 recorded `review: blockers-remaining`; otherwise `ready` (a run that skipped Review is `ready`). Run with those as arguments:
+PR title = the commit subject from Step 4.5a. Mode: `draft` if and only if Step 2.5 recorded `review: blockers-remaining` OR Step 3.5 recorded `verify: fail`; otherwise `ready` (a run that skipped Review/Verify is `ready`). Run with those as arguments:
 
 ```bash
 # Inputs: $1 = PR title, $2 = path to the composed PR body file, $3 = "draft" or "ready".
@@ -418,6 +587,116 @@ Record the final `DELIVER=` line and the PR URL (printed by `gh pr create`/`gh p
 rm -f "${TMPDIR:-/tmp}/autopilot-commit-msg.txt" "${TMPDIR:-/tmp}/autopilot-pr-body.md"
 ```
 
+## Step 4.6: CI Heal (only after Step 4.5 actually pushed)
+
+Runs ONLY when Step 4.5 pushed this run's work (`DELIVER=pushed:*`, or a PR exists on a branch with an upstream after a resume). Like Deliver it is flag-gated, NOT stage-gated. If Step 4.5 was skipped or nothing was pushed, skip this step and record `CI: skipped (nothing pushed)`.
+
+The heal loop is hard-capped at **3** attempts. Reviewer and verify are intentionally NOT re-run inside the loop — re-running expensive adversarial gates inside a bounded fix loop risks a runaway — but the always-blocking secret scan IS re-run on every heal commit, because "no secret ever reaches the remote" must hold even for code this loop produces.
+
+For each attempt (1, 2, 3):
+
+**1. Poll the CI run** tied to the current branch (bounded — never an infinite wait):
+
+```bash
+# Prints exactly one CI_STATE= line: green | red:<run-id> | pending-timeout | unavailable.
+command -v gh >/dev/null 2>&1 || { echo "CI_STATE=unavailable"; exit 0; }
+gh auth status >/dev/null 2>&1 || { echo "CI_STATE=unavailable"; exit 0; }
+branch=$(git rev-parse --abbrev-ref HEAD)
+
+# WHY bounded polling: a workflow that never reports must not hang a hands-free
+# pipeline. Worst case ~5 minutes, then the caller records CI=unavailable.
+MAX_CHECKS=20
+POLL_SLEEP=15
+checks=0
+while [ "$checks" -lt "$MAX_CHECKS" ]; do
+  run_info=$(gh run list --branch "$branch" --limit 1 \
+    --json databaseId,status,conclusion \
+    --jq '.[0] | "\(.databaseId) \(.status) \(.conclusion)"' 2>/dev/null)
+  if [ -z "$run_info" ]; then
+    # The run may not be listed yet right after a push — allow a short grace
+    # window, then conclude there is no workflow / no reachable CI.
+    checks=$((checks + 1))
+    [ "$checks" -ge 4 ] && { echo "CI_STATE=unavailable"; exit 0; }
+    sleep "$POLL_SLEEP"
+    continue
+  fi
+  run_id=${run_info%% *}
+  rest=${run_info#* }
+  run_status=${rest%% *}
+  conclusion=${rest#* }
+  if [ "$run_status" = "completed" ]; then
+    if [ "$conclusion" = "success" ]; then
+      echo "CI_STATE=green"
+    else
+      echo "CI_STATE=red:$run_id"
+    fi
+    exit 0
+  fi
+  checks=$((checks + 1))
+  sleep "$POLL_SLEEP"
+done
+echo "CI_STATE=pending-timeout"
+```
+
+- `CI_STATE=green` → record `CI=green`. Step 4.6 is done.
+- `CI_STATE=unavailable` or `CI_STATE=pending-timeout` → record `CI=unavailable` and stop — do not spin on a broken or slow provider.
+- `CI_STATE=red:<run-id>` → continue to 2.
+
+**2. Pull the failing logs** (run with the run id as `$1`):
+
+```bash
+# Inputs: $1 = the failing run id from CI_STATE=red:<run-id>.
+if gh run view "$1" --log-failed > "${TMPDIR:-/tmp}/autopilot-ci-failure.log" 2>&1; then
+  echo "CI_LOG=${TMPDIR:-/tmp}/autopilot-ci-failure.log"
+else
+  echo "CI_LOG=unavailable"
+fi
+```
+
+If it prints `CI_LOG=unavailable`, record `CI=unavailable` and stop.
+
+**3. Delegate the engineer** subagent with the failing log content as the fix brief: fix ONLY what the log shows failing — no scope creep, no refactors.
+
+**4. Commit, re-scan, push** the heal fix (run with the attempt number as `$1`):
+
+```bash
+# Inputs: $1 = heal attempt number (1-3).
+ATTEMPT="$1"
+
+git add -A
+# Runtime state, never content (same exclusions as Step 4.5b).
+git reset -q -- .claude/.autopilot-active .claude/.autopilot-finished .claude/settings.local.json 2>/dev/null || true
+
+if git diff --cached --quiet; then
+  echo "CI-HEAL=nothing-to-commit"
+  exit 0
+fi
+
+# Plain Conventional Commit; NO AI-attribution trailer.
+git commit -q -m "fix: address CI failure (heal attempt $ATTEMPT)" || { echo "CI-HEAL=commit-failed"; exit 1; }
+
+# ALWAYS re-run the unconditional secret scan on the heal diff BEFORE the push.
+# WHY: heal commits never passed reviewer/verify; the ONE guarantee that must
+# still hold for code this loop produces is "no secret reaches the remote."
+SECRET_PATTERN='AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|AIza[0-9A-Za-z_-]{35}|ya29\.[0-9A-Za-z_-]+'
+if git show HEAD 2>/dev/null | grep -E '^\+' | grep -E -q "$SECRET_PATTERN"; then
+  # Undo the commit but keep the work staged for a human to inspect. Never push.
+  git reset -q --soft HEAD~1
+  echo "CI-HEAL=ABORTED-secret-detected"
+  exit 1
+fi
+
+git push || { echo "CI-HEAL=push-failed"; exit 1; }
+echo "CI-HEAL=pushed:attempt-$ATTEMPT"
+```
+
+- `CI-HEAL=nothing-to-commit` → the engineer produced no change; record it and stop (re-dispatching on the same log would loop).
+- `CI-HEAL=ABORTED-secret-detected` → surface LOUDLY, record it, and stop. The heal commit was undone and never pushed.
+- `CI-HEAL=commit-failed` / `CI-HEAL=push-failed` → surface git's error, record, stop. Do NOT retry.
+- `CI-HEAL=pushed:attempt-N` → loop back to 1 for the next poll.
+
+If all 3 attempts are used and CI is still not green, record `CI=red-after-3-attempts`. Every outcome feeds the Step 5 summary — a human resolves anything that is not green.
+
 ## Step 5: Summary & Cleanup
 
 Provide a summary first, THEN remove the sentinel:
@@ -446,13 +725,23 @@ Provide a summary first, THEN remove the sentinel:
   - `All passing: {yes/no}` (when qa-expert ran)
   - `Skipped: markdown-only change set, no automated tests applicable` (when Step 3 was bypassed)
 
+### Verification (if ran)
+- {verify: pass | fail (reason) | not-applicable}
+
+### Security (if ran)
+- {security: pass | advisories (summary) | BLOCKED-secret (locations) | advisories (blocking via --strict-security)}
+
 ### Documentation Updated (if ran)
 - {list of docs updated}
 
 ### Delivery
 - {one of the following, depending on flags and outcome:}
   - `Skipped (no --deliver flag). Deliver manually with: /autopilot-from docs --deliver`
+  - `Blocked: {security: BLOCKED-secret | advisories via --strict-security}` — nothing committed or pushed
   - `{final DELIVER=... outcome}` plus the PR URL and mode (draft/ready) when a PR was opened
+
+### CI
+- {one of: `green` | `red-after-3-attempts` | `unavailable` | `CI-HEAL=...` terminal outcome | `skipped (nothing pushed)`}
 
 ### Issues / Warnings
 - {anything that needs human attention}

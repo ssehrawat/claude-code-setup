@@ -64,12 +64,27 @@ Two modes of operation:
 - `/review-plan` → review and approve the plan
 - `/implement` → delegates to the **engineer** agent for production-grade implementation
 - `/review` → adversarial diff review via the **reviewer** agent (report only, never fixes)
+- `/verify` → real-run check: start the app / invoke the CLI / run the README example; failure is blocking in manual mode
 - After implementation, **qa-expert** and **doc-maintainer** run automatically via Stop hook
 
 ### Autopilot (fully automated)
-- `/autopilot` → runs the entire chain: plan → implement → review → test → docs
+- `/autopilot` → runs the entire chain: plan → implement → review → test → verify → security → docs
 - The **reviewer** gates between implement and test: blockers dispatch an engineer fix pass then a re-review, capped at 2 iterations; surviving blockers are recorded, never silently dropped
-- `--deliver` (or `--deploy`, which implies it) adds a delivery stage: commit (Conventional Commit, no AI-attribution trailer), push, open a PR (draft if blockers remain). OFF by default — without the flag nothing touches a remote
+- Verify (Step 3.5) is advisory in autopilot: outcome recorded, never blocks; a `fail` downgrades a delivered PR to a draft
+- Security (Step 3.6): the secret scan is ALWAYS blocking (a hit stops delivery unconditionally); dependency audits are advisory unless `--strict-security` upgrades them to blocking
+- `--deliver` (or `--deploy`, which implies it) adds a delivery stage: commit (Conventional Commit, no AI-attribution trailer), push, open a PR (draft if blockers remain or verify failed). OFF by default — without the flag nothing touches a remote
+- After a push, CI heal (Step 4.6) reads failing CI logs and dispatches engineer fixes, capped at 3 attempts; the secret scan re-runs on every heal commit before its push
 - No human intervention needed. Plan is auto-approved. All agents run in sequence.
+
+### Change classification (single source of truth)
+- `~/.claude/lib/classify-changes.sh` defines what counts as a source-code change for the Stop hook, autopilot's markdown-only guard, qa-expert's scope guard, and the CI docs-freshness gate
+- The boundary is a curated allowlist: code extensions plus `.sql` (migrations change the data contract); `.yaml`/`Dockerfile`/lockfiles are not source
+- "Markdown-only" means "no source files in the change set" — the inverse of the allowlist, not `grep -v '\.md$'`
+- When the library is missing (installs predating `~/.claude/lib/`), the Stop hook falls back to an inline replica of the same allowlist (`.sql` included); the autopilot/qa-expert guards fall back to a transitional `.md`-blocklist check — re-run `install.sh` to converge them
+
+### CI scaffolding
+- New projects scaffolded by the engineer get `.github/workflows/ci.yml` (from `~/.claude/templates/ci/`, matched to the stack) plus a vendored docs-freshness gate at `.github/scripts/` (`check-docs-fresh.sh` + `classify-changes.sh`)
+- The gate fails a PR when source changed but no doc surface (README.md / CLAUDE.md / docs/** / .env.example) changed; escape with a `[skip-docs]` token in a commit message or the PR body (passed to the gate via the `PR_BODY` env var)
+- No merge base with the target branch (shallow clone) → the gate passes with a warning naming `fetch-depth: 0`; it never blocks a PR whose change set it cannot compute
 
 These agents run as subagents to preserve your main context window

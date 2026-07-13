@@ -7,6 +7,7 @@
 #   commands/build-plan.md            — /build-plan slash command
 #   commands/review-plan.md           — /review-plan slash command
 #   commands/review.md                — /review slash command (code review)
+#   commands/verify.md                — /verify slash command (real-run check, blocking)
 #   commands/implement.md             — /implement slash command
 #   commands/autopilot.md             — /autopilot slash command
 #   commands/autopilot-from.md        — /autopilot-from slash command
@@ -16,6 +17,11 @@
 #   agents/qa-expert.md               — QA & testing expert
 #   agents/doc-maintainer.md          — Technical documentation expert
 #   hooks/update-docs.sh              — Change detection hook (fingerprint-based dedup)
+#   lib/classify-changes.sh           — Shared source-change classifier (single source of truth)
+#   templates/ci/ci.generic.yml       — CI scaffold template (no detected stack)
+#   templates/ci/ci.node.yml          — CI scaffold template (Node)
+#   templates/ci/ci.python.yml        — CI scaffold template (Python)
+#   templates/ci/check-docs-fresh.sh  — Stale-docs CI gate (vendored into scaffolds)
 #
 # Post-install patches to ~/.claude/settings.json:
 #   remoteControlAtStartup: true      — Auto-starts the Remote Control bridge
@@ -63,6 +69,8 @@ fi
 mkdir -p "$CLAUDE_DIR/commands"
 mkdir -p "$CLAUDE_DIR/agents"
 mkdir -p "$CLAUDE_DIR/hooks"
+mkdir -p "$CLAUDE_DIR/lib"
+mkdir -p "$CLAUDE_DIR/templates/ci"
 
 # ── Backup existing settings.json ─────────────────────────────
 if [ -f "$CLAUDE_DIR/settings.json" ]; then
@@ -117,6 +125,9 @@ echo "  ✅ ~/.claude/commands/review-plan.md"
 cp "$SOURCE_DIR/commands/review.md"         "$CLAUDE_DIR/commands/review.md"
 echo "  ✅ ~/.claude/commands/review.md"
 
+cp "$SOURCE_DIR/commands/verify.md"         "$CLAUDE_DIR/commands/verify.md"
+echo "  ✅ ~/.claude/commands/verify.md"
+
 cp "$SOURCE_DIR/commands/implement.md"     "$CLAUDE_DIR/commands/implement.md"
 echo "  ✅ ~/.claude/commands/implement.md"
 
@@ -151,6 +162,19 @@ cp "$SOURCE_DIR/hooks/update-docs.sh"       "$CLAUDE_DIR/hooks/update-docs.sh"
 chmod +x "$CLAUDE_DIR/hooks/update-docs.sh"
 echo "  ✅ ~/.claude/hooks/update-docs.sh"
 
+# WHY lib/ matters: the Stop hook, autopilot Step 3 guard, and qa-expert scope
+# guard all source this file at runtime. Installs predating it fall back to
+# their inline logic until this copy lands.
+cp "$SOURCE_DIR/lib/classify-changes.sh"    "$CLAUDE_DIR/lib/classify-changes.sh"
+echo "  ✅ ~/.claude/lib/classify-changes.sh"
+
+cp "$SOURCE_DIR/templates/ci/ci.generic.yml"       "$CLAUDE_DIR/templates/ci/ci.generic.yml"
+cp "$SOURCE_DIR/templates/ci/ci.node.yml"          "$CLAUDE_DIR/templates/ci/ci.node.yml"
+cp "$SOURCE_DIR/templates/ci/ci.python.yml"        "$CLAUDE_DIR/templates/ci/ci.python.yml"
+cp "$SOURCE_DIR/templates/ci/check-docs-fresh.sh"  "$CLAUDE_DIR/templates/ci/check-docs-fresh.sh"
+chmod +x "$CLAUDE_DIR/templates/ci/check-docs-fresh.sh"
+echo "  ✅ ~/.claude/templates/ci/ (3 CI templates + check-docs-fresh.sh)"
+
 # Clean up clear-turn-lock.sh from previous versions (replaced by fingerprint dedup)
 if [ -f "$CLAUDE_DIR/hooks/clear-turn-lock.sh" ]; then
   rm "$CLAUDE_DIR/hooks/clear-turn-lock.sh"
@@ -181,13 +205,16 @@ echo "     /build-plan <description>    Create an implementation plan"
 echo "     /review-plan latest          Review the most recent plan"
 echo "     /implement <description>     Implement via the engineer agent"
 echo "     /review                      Adversarial code review of the working tree"
+echo "     /verify                      Real-run check: start the app/CLI, assert it works"
 echo "     (tests & docs auto-run after implementation via Stop hook)"
 echo ""
 echo "  ── OPTION 2: Autopilot (fully automated) ───────────"
 echo ""
-echo "     /autopilot <description>     Full chain: Plan → Implement → Review → Test → Docs"
-echo "     /autopilot --deliver <desc>  Same chain, then commit + push + open a PR"
+echo "     /autopilot <description>     Full chain: Plan → Implement → Review → Test →"
+echo "                                  Verify → Security → Docs"
+echo "     /autopilot --deliver <desc>  Same chain, then commit + push + PR + CI self-heal"
 echo "                                  (delivery is OFF by default — no flag, no remote)"
+echo "     --strict-security            Upgrade dependency advisories to delivery-blocking"
 echo "     /autopilot-from <stage> ...  Resume from any stage:"
 echo "       /autopilot-from plan ...         Start from planning (same as /autopilot)"
 echo "       /autopilot-from implement PLAN-003  Skip planning, use existing plan"
@@ -202,6 +229,12 @@ echo "     qa-expert                    Principal QA engineer"
 echo "     doc-maintainer               Staff technical writer"
 echo ""
 echo "  📁 Plans saved to: <project>/docs/plans/PLAN-NNN-slug.md"
+echo ""
+echo "  🧩 Shared classifier: ~/.claude/lib/classify-changes.sh — one definition of"
+echo "     'source change' for the Stop hook, autopilot, qa-expert, and the CI gate."
+echo "     Re-run this installer on older setups to pick it up."
+echo "  🏗️  CI templates: ~/.claude/templates/ci/ — scaffolded into new projects as"
+echo "     .github/workflows/ci.yml + vendored .github/scripts/ docs-freshness gate."
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""

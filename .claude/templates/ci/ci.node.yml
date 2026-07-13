@@ -1,0 +1,43 @@
+# ci.node.yml — GitHub Actions CI template for Node.js projects.
+#
+# Dropped into generated projects as .github/workflows/ci.yml by the engineer
+# scaffold when package.json is detected. The docs-freshness job invokes the
+# vendored gate at .github/scripts/check-docs-fresh.sh (committed alongside
+# .github/scripts/classify-changes.sh — the runner has no ~/.claude install).
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+      - run: npm ci
+      - run: npm run lint --if-present
+      - run: npm test
+      - run: npm run build --if-present
+
+  docs-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # WHY fetch-depth 0: the gate diffs against the merge base with the
+          # target branch, which a shallow clone cannot compute.
+          fetch-depth: 0
+      # WHY `bash <path>` instead of executing directly: immune to a lost
+      # executable bit (a common casualty of Windows checkouts).
+      # WHY PR_BODY via env, not inline interpolation: the PR body is
+      # attacker-controlled text; interpolating it into `run:` would allow
+      # shell injection. As an env var it is inert data (D15 PR-body escape).
+      - run: bash .github/scripts/check-docs-fresh.sh
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}

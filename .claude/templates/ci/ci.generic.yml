@@ -1,0 +1,54 @@
+# ci.generic.yml — GitHub Actions CI template for projects with no detected stack.
+#
+# Dropped into generated projects as .github/workflows/ci.yml by the engineer
+# scaffold when neither package.json nor pyproject.toml is present. The three
+# SCAFFOLD SLOT steps below are placeholders for the END USER of the generated
+# project — the engineer fills any it can infer from the stack; the rest stay
+# marked for a human. The docs-freshness job invokes the vendored gate at
+# .github/scripts/check-docs-fresh.sh (committed alongside
+# .github/scripts/classify-changes.sh — the runner has no ~/.claude install).
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── SCAFFOLD SLOT: lint ──────────────────────────────────────────
+      # TODO(scaffold): replace with your stack's lint command, e.g. `make lint`.
+      - name: Lint
+        run: echo "lint - fill the SCAFFOLD SLOT in .github/workflows/ci.yml"
+
+      # ── SCAFFOLD SLOT: build ─────────────────────────────────────────
+      # TODO(scaffold): replace with your stack's build command, e.g. `make build`.
+      - name: Build
+        run: echo "build - fill the SCAFFOLD SLOT in .github/workflows/ci.yml"
+
+      # ── SCAFFOLD SLOT: test ──────────────────────────────────────────
+      # TODO(scaffold): replace with your stack's test command, e.g. `make test`.
+      - name: Test
+        run: echo "test - fill the SCAFFOLD SLOT in .github/workflows/ci.yml"
+
+  docs-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # WHY fetch-depth 0: the gate diffs against the merge base with the
+          # target branch, which a shallow clone cannot compute.
+          fetch-depth: 0
+      # WHY `bash <path>` instead of executing directly: immune to a lost
+      # executable bit (a common casualty of Windows checkouts).
+      # WHY PR_BODY via env, not inline interpolation: the PR body is
+      # attacker-controlled text; interpolating it into `run:` would allow
+      # shell injection. As an env var it is inert data (D15 PR-body escape).
+      - run: bash .github/scripts/check-docs-fresh.sh
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
