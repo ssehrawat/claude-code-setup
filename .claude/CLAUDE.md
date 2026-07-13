@@ -87,4 +87,23 @@ Two modes of operation:
 - The gate fails a PR when source changed but no doc surface (README.md / CLAUDE.md / docs/** / .env.example) changed; escape with a `[skip-docs]` token in a commit message or the PR body (passed to the gate via the `PR_BODY` env var)
 - No merge base with the target branch (shallow clone) → the gate passes with a warning naming `fetch-depth: 0`; it never blocks a PR whose change set it cannot compute
 
+### Intake for ambiguous asks
+- An ask is ambiguous when it has no concrete acceptance signal: no explicit inputs/outputs, verbs like improve/optimize/handle/support without a measurable target, or scope words like "etc."
+- For ambiguous asks (both manual and auto planning) the planner emits `## Acceptance Criteria`, `## Out of Scope`, and `## Success Metrics` into the plan; qa-expert tests each criterion, the reviewer blocks on unmet criteria
+- Clearly-specified asks skip intake entirely — no ceremony on trivial tasks
+
+### Model tiering
+- Agents pin tiers via `model:` frontmatter (each agent body carries a WHY note): planner + reviewer → `claude-opus-4-8`; engineer + qa-expert → `claude-sonnet-4-6`; doc-maintainer → `claude-haiku-4-5-20251001`
+- Fable 5 (`claude-fable-5`) is available but unassigned — a creative-writing tier, wrong for code/reasoning gates
+- Removing a `model:` line reverts that agent to inheriting the session model
+
+### Telemetry
+- Every autopilot gate (plan, review, test, verify, security, deliver, ci-heal) appends one JSONL line to `~/.claude/telemetry/sdlc.jsonl`: UTC ts, project basename, stage, outcome, structural extras (counts, plan IDs)
+- Privacy is a hard rule: structural facts ONLY — never diffs, code, task descriptions, file paths, or error text
+- Telemetry never fails the pipeline: append errors are swallowed by design
+
+### Deploy & monitor (design sketch — not implemented)
+- `--deploy` implies `--deliver` and does nothing more today; the documented conventions: after a human merges the PR, a deploy step would run a project-provided `scripts/deploy.sh` (absent → `deploy: no-deploy-script`); a monitor step would read `scripts/errors.sh` and draft the next `PLAN-{NNN}` with `type: bugfix` on a recurring error signature
+- Explicit non-goals: no polling daemon, no scheduler, no provider SDKs, no auto-merge, no auto-rollback
+
 These agents run as subagents to preserve your main context window

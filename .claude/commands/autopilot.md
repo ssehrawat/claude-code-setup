@@ -38,9 +38,55 @@ echo "STRICT_SECURITY=$STRICT_SECURITY"
 echo "TASK=$TASK"
 ```
 
-Use `TASK` (the flag-stripped remainder) as the task description everywhere below that refers to `$ARGUMENTS` — Step 0 auto-naming and the Step 1 planning brief. `DELIVER=1` activates Step 4.5 (and Step 4.6 when something is pushed). `STRICT_SECURITY=1` upgrades Step 3.6 dependency advisories from advisory to delivery-blocking. `DEPLOY=1` currently only implies `--deliver`; the deploy stage itself is Phase 3 of the outer-loop plan and is a no-op today.
+Use `TASK` (the flag-stripped remainder) as the task description everywhere below that refers to `$ARGUMENTS` — Step 0 auto-naming and the Step 1 planning brief. `DELIVER=1` activates Step 4.5 (and Step 4.6 when something is pushed). `STRICT_SECURITY=1` upgrades Step 3.6 dependency advisories from advisory to delivery-blocking. `DEPLOY=1` currently only implies `--deliver`; the deploy stage itself is a documented design sketch (next section), not an implementation.
 
 Outward-facing actions (commit, push, PR) are OFF by default: with no flag, this pipeline never touches a remote — identical to a run before delivery existed. The upfront flag IS the confirmation, so the run stays hands-free either way and no mid-run prompt is ever needed.
+
+---
+
+## Deploy & Monitor (design sketch — NOT implemented)
+
+`--deploy` implies `--deliver` and does nothing more today. The conventions below are documented so projects can prepare for them; none of this runs:
+
+- **Deploy** — AFTER a human merges the PR (merging is never automated), a deploy step would invoke a project-provided `scripts/deploy.sh` when it exists — convention over configuration, no provider logic in this pipeline. Absent script → recorded as `deploy: no-deploy-script`, never an error.
+- **Monitor → next plan** — a monitor step would run a project-provided `scripts/errors.sh` (a wrapper the project points at a log file or error-tracker CLI) and, on a recurring error signature, draft the next `PLAN-{NNN}` in `./docs/plans/` with `type: bugfix` describing the observed failure — feeding the next iteration of the loop.
+
+Explicit non-goals: no polling daemon, no scheduler, no cloud-provider SDKs, no auto-merge, no auto-rollback. The sketch defines the interface (the two scripts) and the hand-off (draft the next plan), nothing more.
+
+---
+
+## Telemetry (helper used by the gates below)
+
+Each gate appends one JSONL line to `$HOME/.claude/telemetry/sdlc.jsonl`. Wherever a step says "emit telemetry", run this block with `$1` = stage, `$2` = outcome, and optionally `$3` = an extra JSON fragment. A step that never executes emits nothing; steps told to record an explicit skip emit that skip outcome.
+
+```bash
+# Inputs: $1 = stage (plan|review|test|verify|security|deliver|ci-heal),
+#         $2 = outcome (a short structural keyword, e.g. success, approved,
+#              blockers-remaining, pass, skipped-markdown-only),
+#         $3 = optional extra JSON fragment of already-formed pairs, e.g.
+#              "plan_id":"PLAN-007","iterations":1  (no surrounding braces/comma).
+# PRIVACY (hard rule): record only structural facts — timestamps, stage names,
+# outcomes, counts, plan IDs, the project basename. NEVER diffs, code, task
+# descriptions, file paths, or error text.
+emit_metric() {
+  TELEM_DIR="$HOME/.claude/telemetry"
+  # WHY every failure path ends in `|| :`: telemetry is an observability
+  # side-channel; an unwritable $HOME (read-only mount, quota) must never
+  # fail the pipeline over a metrics line.
+  mkdir -p "$TELEM_DIR" 2>/dev/null || :
+  # WHY tr: a quote, backslash, or control char in a directory name must not
+  # corrupt the JSONL — one malformed line breaks every future read of the file.
+  proj=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | tr -d '\000-\037"\\')
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # WHY 2>/dev/null BEFORE >>: redirections process left to right; if the append
+  # target is unwritable, the shell's diagnostic must already be silenced.
+  printf '{"ts":"%s","project":"%s","stage":"%s","outcome":"%s"%s}\n' \
+    "$ts" "$proj" "$1" "$2" "${3:+,$3}" 2>/dev/null >> "$TELEM_DIR/sdlc.jsonl" || :
+}
+emit_metric "$1" "$2" "$3"
+```
+
+Cycle time is derived at read-time — the `plan` line's `ts` to the same run's last line — nothing is computed here.
 
 ---
 
@@ -169,7 +215,7 @@ Delegate to the **planner** subagent. The "AUTOMODE" keyword above tells it to o
 - Fix any issues found during self-review
 - Set status to `approved`
 
-Read the plan back after it's created. You need it for Step 2.
+Read the plan back after it's created. You need it for Step 2. Emit telemetry: the Telemetry block with `plan` `success` and extra `"plan_id":"PLAN-{NNN}"`.
 
 ## Step 1.5: Plan Validation
 
@@ -270,6 +316,8 @@ Parse that final line and apply the bounded fix loop:
 
 WHY the loop lives in this command and not in the reviewer agent: agents are stateless single-shot subagents; orchestration and loop caps belong in the command layer, exactly as the branch-creation retry budget lives in the calling command rather than in the engineer.
 
+Emit telemetry: the Telemetry block with `review`, the recorded outcome (`approved`, `approved-after-fixes`, or `blockers-remaining`), and extra `"iterations":<0-2>,"blockers":<n>`.
+
 ## Step 3: Test
 
 Before delegating to qa-expert, run:
@@ -302,6 +350,8 @@ Delegate to the **qa-expert** subagent:
 - Run the test suite to verify everything passes
 - If tests fail, fix the code or tests until green
 - Check eval coverage if `evals/` exists
+
+Emit telemetry: the Telemetry block with `test` and the outcome — `pass`, `fail`, or `skipped-markdown-only` (when Step 3 was bypassed).
 
 ## Step 3.5: Verify (real-run, advisory)
 
@@ -385,7 +435,7 @@ fi
 exit 0
 ```
 
-Record the `VERIFY=` line for Step 5 and the Step 4.5c draft decision, then continue.
+Record the `VERIFY=` line for Step 5 and the Step 4.5c draft decision, emit telemetry — the Telemetry block with `verify` and the recorded outcome (`pass`, `fail`, or `not-applicable`) — then continue.
 
 ## Step 3.6: Security
 
@@ -453,7 +503,7 @@ fi
 
 If the built-in security-review skill is available in this session, run it over the diff for logic-level vulnerabilities (injection, authz gaps, unsafe eval). Its findings are advisory: record them for the Step 5 summary and the PR body. Never block on them.
 
-Outcome for Step 5: `BLOCKED-secret` if 3.6a hit; else `advisories` if 3.6b or 3.6c found anything; else `pass`.
+Outcome for Step 5: `BLOCKED-secret` if 3.6a hit; else `advisories` if 3.6b or 3.6c found anything; else `pass`. Emit telemetry: the Telemetry block with `security` and that outcome.
 
 ## Step 4: Document
 
@@ -467,9 +517,9 @@ Delegate to the **doc-maintainer** subagent:
 
 ## Step 4.5: Deliver (only when `--deliver`/`--deploy` was passed)
 
-Runs ONLY if Flag Parsing set `DELIVER=1`. If `DELIVER=0`, skip this entire step — nothing touches the remote — and record in the Step 5 summary: `Delivery: skipped (no --deliver flag). Deliver manually with: /autopilot-from docs --deliver`.
+Runs ONLY if Flag Parsing set `DELIVER=1`. If `DELIVER=0`, skip this entire step — nothing touches the remote — and record in the Step 5 summary: `Delivery: skipped (no --deliver flag). Deliver manually with: /autopilot-from docs --deliver`. Emit telemetry: the Telemetry block with `deliver` `skipped-no-flag`.
 
-Also skip this step (and Step 4.6) when Step 3.6 recorded `security: BLOCKED-secret` — a detected credential blocks delivery unconditionally, flag or no flag — or when `--strict-security` upgraded dependency advisories to blocking. Record the blocking outcome in the Step 5 summary.
+Also skip this step (and Step 4.6) when Step 3.6 recorded `security: BLOCKED-secret` — a detected credential blocks delivery unconditionally, flag or no flag — or when `--strict-security` upgraded dependency advisories to blocking. Record the blocking outcome in the Step 5 summary and emit telemetry: `deliver` with `BLOCKED-secret` or `BLOCKED-strict-security` (tokens match the `SECURITY=` sentinel spelling so read-time consumers can correlate them).
 
 ### Step 4.5a: Compose the commit message and PR body
 
@@ -566,7 +616,7 @@ fi
 echo "DELIVER=pr-created:$PR_MODE"
 ```
 
-Record the final `DELIVER=` line and the PR URL (printed by `gh pr create`/`gh pr view`) for the Step 5 summary, then clean up the composed files:
+Record the final `DELIVER=` line and the PR URL (printed by `gh pr create`/`gh pr view`) for the Step 5 summary, and emit telemetry: the Telemetry block with `deliver` and the final `DELIVER=` outcome keyword (e.g. `pr-created:ready`, `pr-already-exists`, `skip-no-gh`, `commit-failed`; for `pushed:<branch>` emit just `pushed` — branch names are not structural facts). Then clean up the composed files:
 
 ```bash
 rm -f "${TMPDIR:-/tmp}/autopilot-commit-msg.txt" "${TMPDIR:-/tmp}/autopilot-pr-body.md"
@@ -574,7 +624,7 @@ rm -f "${TMPDIR:-/tmp}/autopilot-commit-msg.txt" "${TMPDIR:-/tmp}/autopilot-pr-b
 
 ## Step 4.6: CI Heal (only after Step 4.5 actually pushed)
 
-Runs ONLY when Step 4.5 pushed this run's work (`DELIVER=pushed:*`, or a PR exists on a branch with an upstream after a resume). Like Deliver it is flag-gated, NOT stage-gated. If Step 4.5 was skipped or nothing was pushed, skip this step and record `CI: skipped (nothing pushed)`.
+Runs ONLY when Step 4.5 pushed this run's work (`DELIVER=pushed:*`, or a PR exists on a branch with an upstream after a resume). Like Deliver it is flag-gated, NOT stage-gated. If Step 4.5 was skipped or nothing was pushed, skip this step, record `CI: skipped (nothing pushed)`, and emit telemetry: the Telemetry block with `ci-heal` `skipped`.
 
 The heal loop is hard-capped at **3** attempts. Reviewer and verify are intentionally NOT re-run inside the loop — re-running expensive adversarial gates inside a bounded fix loop risks a runaway — but the always-blocking secret scan IS re-run on every heal commit, because "no secret ever reaches the remote" must hold even for code this loop produces.
 
@@ -681,6 +731,8 @@ echo "CI-HEAL=pushed:attempt-$ATTEMPT"
 - `CI-HEAL=pushed:attempt-N` → loop back to 1 for the next poll.
 
 If all 3 attempts are used and CI is still not green, record `CI=red-after-3-attempts`. Every outcome feeds the Step 5 summary — a human resolves anything that is not green.
+
+Emit telemetry: the Telemetry block with `ci-heal`, the terminal outcome (`green`, `red-after-3-attempts`, `unavailable`, `ABORTED-secret-detected`, `nothing-to-commit`, `commit-failed`, or `push-failed` — each token exactly as its recorded `CI=`/`CI-HEAL=` sentinel spells it), and extra `"attempts":<0-3>`.
 
 ## Step 5: Summary & Cleanup
 

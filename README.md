@@ -84,6 +84,12 @@ Step 5:   summary    → reports what was done
 /autopilot-from implement PLAN-001             ← rest runs hands-free
 ```
 
+### Intake for Ambiguous Asks
+
+When a request lacks a concrete acceptance signal — no explicit inputs/outputs, verbs like "improve"/"optimize"/"handle"/"support" without a measurable target, or open-ended scope words like "etc." — the planner adds three sections to the plan before designing anything: `## Acceptance Criteria` (a checklist of observable outcomes), `## Out of Scope`, and `## Success Metrics`. Downstream, qa-expert treats each acceptance criterion as a test target and the reviewer treats each as a review criterion — an unmet criterion is a blocker. That closes the loop from intent → tests → review.
+
+Clearly-specified asks (explicit inputs/outputs, a named file/endpoint/behavior, a reproducible bug) skip intake entirely — no ceremony on trivial tasks. Applies in both manual (`/build-plan`) and autopilot planning.
+
 ### Code Review
 
 Every autopilot run that implements code reviews the engineer's diff before tests: the **reviewer** agent critiques the changes against `.claude/CLAUDE.md` standards (correctness, error handling, AI slop, type safety, security smells) and emits blocker/should-fix/nit findings. Blockers dispatch the engineer for a fix pass, then a re-review — capped at 2 iterations so a hands-free run always terminates. Blockers that survive the cap are recorded as `blockers-remaining` and, with `--deliver`, turn the PR into a **draft** with the blockers listed in the body. Runs resumed at `test` or `docs` skip the review — there is nothing new to review.
@@ -109,7 +115,7 @@ What delivery does:
 - Fails loudly when git fails: a failing commit (unreadable message file, pre-commit hook) or a rejected push ends delivery with a distinct `commit-failed`/`push-failed` outcome — never misreported as "nothing to commit". Staged work is left intact, nothing is retried, no PR is opened.
 - In `/autopilot-from`, delivery is **flag-gated, not stage-gated**: a run resumed at `test` or `docs` still delivers when the flag is present.
 
-`--deploy` implies `--deliver`; the deploy stage itself is a later phase and is currently a no-op. Merging is always a human decision — nothing auto-merges.
+`--deploy` implies `--deliver`; the deploy stage itself is a documented design sketch, not an implementation — see "Deploy & Monitor" below. Merging is always a human decision — nothing auto-merges.
 
 ### Real-Run Verification (`/verify` + autopilot Step 3.5)
 
@@ -134,6 +140,29 @@ Only after delivery actually pushed. Autopilot polls the branch's CI run (bounde
 - `gh`/network failure records `CI=unavailable` and stops — it never spins.
 - A heal attempt that goes nowhere ends the loop cleanly: the engineer produced no change (`CI-HEAL=nothing-to-commit` — re-dispatching on the same log would loop) or git failed (`CI-HEAL=commit-failed`/`push-failed` — surfaced, never retried).
 - **The secret scan re-runs on every heal commit before its push.** Heal commits never passed the reviewer or verify (re-running expensive gates inside a bounded fix loop risks a runaway), but the one unconditional guarantee — no secret ever reaches the remote — holds even for code the loop itself produces. A hit undoes the commit and aborts with `CI-HEAL=ABORTED-secret-detected`.
+
+### Deploy & Monitor (design sketch — not implemented)
+
+`--deploy` implies `--deliver` and does nothing more today. The designed conventions are documented so projects can prepare for them; none of this runs:
+
+- **Deploy** — after a human merges the PR (merging is never automated), a deploy step would invoke a project-provided `scripts/deploy.sh` when it exists — convention over configuration, no provider logic in the pipeline. Absent script → recorded as `deploy: no-deploy-script`, never an error.
+- **Monitor → next plan** — a monitor step would run a project-provided `scripts/errors.sh` (a wrapper the project points at a log file or error-tracker CLI) and, on a recurring error signature, draft the next `PLAN-{NNN}` in `./docs/plans/` with `type: bugfix` describing the observed failure — the "outer-outer" loop that feeds the next iteration.
+
+Explicit non-goals: no polling daemon, no scheduler, no cloud-provider SDKs, no auto-merge, no auto-rollback. The sketch defines the interface (the two scripts) and the hand-off (draft the next plan), nothing more.
+
+### Telemetry
+
+Every autopilot gate appends one JSON line to `~/.claude/telemetry/sdlc.jsonl`: UTC timestamp, project basename, stage (`plan`, `review`, `test`, `verify`, `security`, `deliver`, `ci-heal`), outcome, and structural extras like retry counts and plan IDs.
+
+**Privacy is a hard rule:** only structural facts are recorded — never diffs, code, task descriptions, file paths, or error text. The file lives outside every project tree (generated repos stay clean) and is global on purpose, so cross-project cycle-time trends are visible in one place. Cycle time is derived at read-time from the `plan` line's timestamp to the same run's last line.
+
+Inspect it with node (no `jq` dependency):
+
+```bash
+node -e "require('fs').readFileSync(process.env.HOME+'/.claude/telemetry/sdlc.jsonl','utf8').trim().split('\n').map(JSON.parse).forEach(e=>console.log(e.ts,e.project,e.stage,e.outcome))"
+```
+
+Telemetry never fails a run — an unwritable file is silently skipped. Reset it any time: `rm ~/.claude/telemetry/sdlc.jsonl`.
 
 ### CI Templates & the Stale-Docs Gate
 
@@ -237,7 +266,19 @@ Before the engineer agent writes any files, the pipeline creates a feature branc
 
 ## Expert Agents
 
-All agents inherit the model from your current session (Opus, Sonnet, etc.), with one exception: the reviewer pins `claude-opus-4-8` — adversarial critique is the gate where a missed defect ships, so it always gets the top tier.
+### Model Tiering
+
+Each agent pins the model tier that matches its job (via `model:` frontmatter, documented with a WHY note in each agent body):
+
+| Agent | Model | Why this tier |
+|-------|-------|---------------|
+| planner | `claude-opus-4-8` | Deep reasoning — architecture, tradeoffs, failure modes; a planning miss compounds downstream |
+| reviewer | `claude-opus-4-8` | Adversarial critique — the gate where a missed defect ships |
+| engineer | `claude-sonnet-4-6` | Strong coding at lower cost; override per-session for genuinely hard tasks |
+| qa-expert | `claude-sonnet-4-6` | Test authorship is strong-coding work — same tier as the code it tests |
+| doc-maintainer | `claude-haiku-4-5-20251001` | Mechanical, high-volume, cost-sensitive |
+
+Fable 5 (`claude-fable-5`) is **available but deliberately unassigned**: it is a creative-writing–oriented tier, the wrong tool for code and reasoning gates. Removing a `model:` line reverts that agent to inheriting the session model.
 
 | Agent | Persona | When It Runs |
 |-------|---------|-------------|
