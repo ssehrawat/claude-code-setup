@@ -75,7 +75,9 @@ emit_metric() {
   mkdir -p "$TELEM_DIR" 2>/dev/null || :
   # WHY tr: a quote, backslash, or control char in a directory name must not
   # corrupt the JSONL — one malformed line breaks every future read of the file.
-  proj=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | tr -d '\000-\037"\\')
+  # WHY 2>/dev/null on tr: GNU tr warns about the trailing backslash escape on
+  # some execution layers; the warning is stderr noise, never wrong output.
+  proj=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | tr -d '\000-\037"\\' 2>/dev/null)
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   # WHY 2>/dev/null BEFORE >>: redirections process left to right; if the append
   # target is unwritable, the shell's diagnostic must already be silenced.
