@@ -34,7 +34,11 @@ Specialized personas delegated to via Claude Code's subagent system. Each agent 
 | qa-expert | `agents/qa-expert.md` | Stop hook, `/autopilot` Step 3 |
 | doc-maintainer | `agents/doc-maintainer.md` | Stop hook, `/autopilot` Step 4 |
 
-The reviewer is deliberately NOT wired into the Stop hook: the hook runs its agents in parallel, but review must gate *before* docs and be able to loop with the engineer, so it lives as an ordered autopilot step (2.5) plus the manual `/review` command. Its tools exclude Write/Edit (a reviewer that can edit is a second engineer), and it pins `model: claude-opus-4-8`.
+The reviewer is deliberately NOT wired into the Stop hook: the hook runs its agents in parallel, but review must gate *before* docs and be able to loop with the engineer, so it lives as an ordered autopilot step (2.5) plus the manual `/review` command. Its tools exclude Write/Edit (a reviewer that can edit is a second engineer).
+
+**Model tiering.** Each agent pins the tier matching its job via `model:` frontmatter, with a WHY note in the agent body (not a YAML comment — some parsers drop those): planner and reviewer → `claude-opus-4-8` (deep reasoning / adversarial critique, the gates where a miss compounds or ships); engineer and qa-expert → `claude-sonnet-4-6` (strong coding at lower cost); doc-maintainer → `claude-haiku-4-5-20251001` (mechanical, high-volume). Fable 5 (`claude-fable-5`) is available but deliberately unassigned — a creative-writing tier, wrong for code/reasoning gates. Removing a `model:` line reverts that agent to inheriting the session model.
+
+**Intake (planner).** Before writing the plan body, the planner classifies the ask. Ambiguous asks — no concrete acceptance signal (no explicit inputs/outputs; improve/optimize/handle/support without a measurable target; "etc."-style scope) — get three extra plan sections: `## Acceptance Criteria` (observable outcomes), `## Out of Scope`, `## Success Metrics`. qa-expert treats each criterion as a test target; the reviewer treats each as a review criterion and blocks on unmet ones. Clearly-specified asks skip intake — no ceremony. Applies in both manual and auto planning.
 
 ### Stop Hook (`hooks/update-docs.sh`)
 
@@ -73,6 +77,14 @@ When `git merge-base` fails (shallow clone or unfetched base ref — possible on
 ### CI Heal (autopilot Step 4.6)
 
 Runs only after Deliver actually pushed; flag-gated like Deliver, not stage-gated. Polls the branch's latest CI run via `gh` (bounded number of checks — never an infinite wait); on red, pulls `gh run view --log-failed`, dispatches the engineer with the log as the fix brief, commits, **re-runs the always-blocking secret scan on the heal diff** (a hit undoes the commit and aborts with `CI-HEAL=ABORTED-secret-detected` — never pushed), then pushes. Hard cap: 3 attempts, then `CI=red-after-3-attempts`. `gh`/network failure records `CI=unavailable` and stops. A heal attempt can also end the loop on its own: `CI-HEAL=nothing-to-commit` (the engineer produced no change — re-dispatching on the same log would loop) and `CI-HEAL=commit-failed`/`push-failed` (git's error surfaced, never retried). Every terminal outcome — `green`, `red-after-3-attempts`, `unavailable`, a `CI-HEAL=…` stop, or `skipped (nothing pushed)` — feeds the Step 5 summary. Reviewer and verify are intentionally not re-run inside the loop (cost + loop-safety); the secret scan is, because its guarantee is unconditional.
+
+### Telemetry (`~/.claude/telemetry/sdlc.jsonl`)
+
+Both autopilot commands carry a byte-identical `emit_metric` POSIX helper block. Each gate (plan, review, test, verify, security, deliver, ci-heal) appends one JSONL line: `{"ts":"<UTC ISO>","project":"<repo basename>","stage":"…","outcome":"…"[,extras]}`. Extras are structural only — iteration/attempt counts, blocker counts, plan IDs. Privacy is a hard rule: never diffs, code, task descriptions, file paths, or error text. The file is global (per D10) so generated project trees stay clean and cross-project cycle-time trends live in one place; cycle time is derived at read-time from the `plan` line to the run's last line. Every failure path in the helper ends in `|| :` — telemetry can never fail the pipeline — and the project basename is sanitized with `tr -d '\000-\037"\\'` before formatting, because a quote, backslash, or control character in a directory name would emit a malformed line and break every future read of the file. Inspect with `node -e` (no jq dependency); reset with `rm ~/.claude/telemetry/sdlc.jsonl`.
+
+### Deploy & Monitor (design sketch — not implemented)
+
+`--deploy` implies `--deliver` and does nothing more today. The documented conventions (in the autopilot command body and README): after a **human** merges the PR, a deploy step would invoke a project-provided `scripts/deploy.sh` when present (convention over configuration; absent → `deploy: no-deploy-script`); a monitor step would run a project-provided `scripts/errors.sh` and, on a recurring error signature, draft the next `PLAN-{NNN}` with `type: bugfix` — the outer-outer loop. Explicit non-goals: no polling daemon, no scheduler, no provider SDKs, no auto-merge, no auto-rollback.
 
 ### Installer (`install.sh`)
 
@@ -168,6 +180,8 @@ User runs /autopilot <description> [--deliver|--deploy]
         nothing touches the remote)
   -> Step 4.6 (only if 4.5 pushed): poll CI -> on red, engineer fixes from the
        failing log -> secret re-scan -> push (capped at 3 attempts)
+  -> each gate above appends one privacy-safe JSONL line to
+       ~/.claude/telemetry/sdlc.jsonl (stage, outcome, counts — never content)
   -> touches .claude/.autopilot-finished marker, removes sentinel
   -> Claude stops
   -> Stop hook fires, sees the finished-marker, saves the fingerprint,
@@ -233,5 +247,6 @@ docs/
 Runtime artifacts (not committed):
 - `~/.claude/hooks/.fingerprints/` -- per-session `.fingerprint` (last-processed) and `.baseline` (session-start snapshot) files
 - `~/.claude/hooks/update-docs.log` -- debug log
+- `~/.claude/telemetry/sdlc.jsonl` -- per-gate autopilot telemetry (structural facts only)
 - `.claude/.autopilot-active` -- sentinel file during autopilot runs
 - `.claude/.autopilot-finished` -- handoff marker from autopilot cleanup to the Stop hook (consumed on the hook's next fire)

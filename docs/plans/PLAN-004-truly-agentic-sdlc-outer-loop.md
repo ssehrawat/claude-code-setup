@@ -1,13 +1,13 @@
 ---
 id: PLAN-004
 date: 2026-07-12
-status: in-progress
+status: implemented
 type: feature
 mode: auto
 summary: Close the agentic SDLC outer loop (review → deliver → CI-heal → verify → secure → deploy → monitor) across three independently shippable phases.
 ---
 
-> **Progress:** Phase 1 (P1-1 … P1-8) implemented on 2026-07-12; Phase 2 (P2-1 … P2-15) implemented on 2026-07-12; Phase 3 pending.
+> **Progress:** Phase 1 (P1-1 … P1-8) implemented on 2026-07-12; Phase 2 (P2-1 … P2-15) implemented on 2026-07-12; Phase 3 (P3-1 … P3-6) implemented on 2026-07-13. All three phases done — plan status is `implemented`.
 >
 > **Phase 2 QA amendments (2026-07-12):** (a) `core.quotepath=false` on all git file-listing calls — non-ASCII filenames were C-quoted and silently escaped both the secret scan (D6 violation) and source classification; (b) the docs-freshness gate passes-with-warning when `git merge-base` fails instead of falling back to a direct endpoint diff, which blocked PRs for commits they never made (amends Testing #9(e)'s literal mechanism while preserving its asserted outcomes); (c) the Stop hook's fail-open fallback pattern now INCLUDES `.sql`, resolving the fallback-mode contradiction QA surfaced: the fallback exists for safety during the un-reinstalled window, not to preserve the pre-D19 boundary, so all consumers converge on D19 semantics in both modes (this narrows the "behavior-preserving fallback" wording in D17/P2-2 for the hook's pattern only); (d) the shared markdown-only guard appends `|| :` so `MD_ONLY=0`'s by-design nonzero return isn't rendered as a command failure.
 
@@ -482,6 +482,8 @@ emit_metric() {
     "$ts" "$proj" "$1" "$2" "${3:+,$3}" >> "$TELEM_DIR/sdlc.jsonl"
 }
 ```
+
+> **Hardening note (as implemented, Phase 3):** the shipped block additionally ends every failure path in `|| :` with stderr silenced *before* the append (`2>/dev/null >>`), so an unwritable `$HOME` can never fail the pipeline, and pipes the project basename through `tr -d '\000-\037"\\'` so a quote/backslash/control char in a directory name cannot emit a malformed JSONL line (one bad line would break every future read). This sketch is illustrative; the two autopilot commands carry the authoritative byte-identical block.
 
 Cycle time = derived at read-time from the `plan` start ts and `deliver`/`docs` end ts for a given plan id (recorded as an `"extra"` field). Emitted at: plan, review, test, verify, security, ci-heal, deliver. Privacy per D10 — no diffs, no code, no task text. `install.sh` documents the file; a `.gitignore` entry is NOT needed because it lives under `~/.claude/`, outside any project tree.
 
