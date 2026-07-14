@@ -397,7 +397,7 @@ User commits → Stop fires → no uncommitted files → skip ✓
 User writes more code → Stop fires → new fingerprint → trigger ✓
 ```
 
-### Three safety nets prevent loops
+### Four safety nets prevent loops
 
 1. **Claude Code's built-in `stop_hook_active` flag** — if the hook already caused Claude to continue once, this flag is true on the next fire and the hook exits immediately
 2. **Fingerprint file** — hash of the processed file list, keyed by session; same files = same hash = skip
